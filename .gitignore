@@ -1,0 +1,11 @@
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+*.log
+.vscode/
+.idea/
+SERVER_SETUP.md
+ISSUES_LOG.md
