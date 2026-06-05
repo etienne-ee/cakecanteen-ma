@@ -206,7 +206,6 @@ async def lifespan(app: FastAPI):
             model={"id": "claude-sonnet-4-6"},
             system=SYSTEM_PROMPT,
             tools=[
-                {"type": "agent_toolset_20260401"},
                 {
                     "type": "custom",
                     "name": "search_products",
@@ -340,7 +339,7 @@ async def chat(session_id: str, body: ChatRequest):
                         ],
                     )
                     for event in stream:
-                        if event.type == "agent.tool_use" and event.name == "search_products":
+                        if event.type == "agent.custom_tool_use" and event.name == "search_products":
                             # Notify the frontend that a product search is happening
                             loop.call_soon_threadsafe(queue.put_nowait, event)
                             # Execute the WooCommerce search and return results to the agent
@@ -353,7 +352,7 @@ async def chat(session_id: str, body: ChatRequest):
                                     session_id,
                                     events=[{
                                         "type": "user.custom_tool_result",
-                                        "tool_use_id": event.id,
+                                        "custom_tool_use_id": event.id,
                                         "content": [{"type": "text", "text": json.dumps(results)}],
                                     }],
                                 )
@@ -362,7 +361,7 @@ async def chat(session_id: str, body: ChatRequest):
                                     session_id,
                                     events=[{
                                         "type": "user.custom_tool_result",
-                                        "tool_use_id": event.id,
+                                        "custom_tool_use_id": event.id,
                                         "is_error": True,
                                         "content": [{"type": "text", "text": str(exc)}],
                                     }],
@@ -446,7 +445,7 @@ async def chat(session_id: str, body: ChatRequest):
                     else:
                         yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
 
-            elif event.type == "agent.tool_use":
+            elif event.type == "agent.custom_tool_use":
                 yield f"data: {json.dumps({'type': 'tool', 'name': event.name})}\n\n"
 
             elif event.type == "session.status_idle":
@@ -610,7 +609,7 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
                 ],
             )
             for event in stream:
-                if event.type == "agent.tool_use" and event.name == "search_products":
+                if event.type == "agent.custom_tool_use" and event.name == "search_products":
                     try:
                         results = _search_wc_products(
                             event.input.get("query", ""),
@@ -620,7 +619,7 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
                             session_id,
                             events=[{
                                 "type": "user.custom_tool_result",
-                                "tool_use_id": event.id,
+                                "custom_tool_use_id": event.id,
                                 "content": [{"type": "text", "text": json.dumps(results)}],
                             }],
                         )
@@ -629,7 +628,7 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
                             session_id,
                             events=[{
                                 "type": "user.custom_tool_result",
-                                "tool_use_id": event.id,
+                                "custom_tool_use_id": event.id,
                                 "is_error": True,
                                 "content": [{"type": "text", "text": str(exc)}],
                             }],
