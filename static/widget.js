@@ -1,11 +1,12 @@
 (function () {
   'use strict';
 
-  // Auto-detect backend from this script's own URL.
-  // Falls back to querySelector in case the script runs deferred/async (document.currentScript is null then).
+  // Resolve backend URL: prefer explicit data-backend attribute, then script src origin.
+  // data-backend is needed when the theme loads scripts deferred (document.currentScript is null).
   const _script = document.currentScript
-    || Array.from(document.scripts).find(s => s.src.includes('/static/widget.js'));
-  const BACKEND = _script ? new URL(_script.src).origin : window.location.origin;
+    || Array.from(document.scripts).find(s => s.src && s.src.includes('/static/widget.js'));
+  const BACKEND = (_script && _script.getAttribute('data-backend'))
+    || (_script ? new URL(_script.src).origin : window.location.origin);
 
   // ── Inject CSS ────────────────────────────────────────────────────────────────
   const style = document.createElement('style');
