@@ -352,7 +352,7 @@ async def chat(session_id: str, body: ChatRequest):
                                 client.beta.sessions.events.send(
                                     session_id,
                                     events=[{
-                                        "type": "tool.result",
+                                        "type": "user.custom_tool_result",
                                         "tool_use_id": event.id,
                                         "content": [{"type": "text", "text": json.dumps(results)}],
                                     }],
@@ -361,7 +361,7 @@ async def chat(session_id: str, body: ChatRequest):
                                 client.beta.sessions.events.send(
                                     session_id,
                                     events=[{
-                                        "type": "tool.result",
+                                        "type": "user.custom_tool_result",
                                         "tool_use_id": event.id,
                                         "is_error": True,
                                         "content": [{"type": "text", "text": str(exc)}],
@@ -619,7 +619,7 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
                         client.beta.sessions.events.send(
                             session_id,
                             events=[{
-                                "type": "tool.result",
+                                "type": "user.custom_tool_result",
                                 "tool_use_id": event.id,
                                 "content": [{"type": "text", "text": json.dumps(results)}],
                             }],
@@ -628,7 +628,7 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
                         client.beta.sessions.events.send(
                             session_id,
                             events=[{
-                                "type": "tool.result",
+                                "type": "user.custom_tool_result",
                                 "tool_use_id": event.id,
                                 "is_error": True,
                                 "content": [{"type": "text", "text": str(exc)}],
