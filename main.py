@@ -343,11 +343,12 @@ async def chat(session_id: str, body: ChatRequest):
                             # Notify the frontend that a product search is happening
                             loop.call_soon_threadsafe(queue.put_nowait, event)
                             # Execute the WooCommerce search and return results to the agent
+                            query = event.input.get("query", "")
+                            per_page = min(int(event.input.get("per_page", 10)), 25)
+                            print(f"[TOOL] search_products called — query={query!r} per_page={per_page} event_id={event.id}")
                             try:
-                                results = _search_wc_products(
-                                    event.input.get("query", ""),
-                                    min(int(event.input.get("per_page", 10)), 25),
-                                )
+                                results = _search_wc_products(query, per_page)
+                                print(f"[TOOL] WooCommerce returned {len(results)} products")
                                 client.beta.sessions.events.send(
                                     session_id,
                                     events=[{
@@ -356,7 +357,9 @@ async def chat(session_id: str, body: ChatRequest):
                                         "content": [{"type": "text", "text": json.dumps(results)}],
                                     }],
                                 )
+                                print(f"[TOOL] tool result sent OK")
                             except Exception as exc:
+                                print(f"[TOOL] ERROR — {exc}")
                                 client.beta.sessions.events.send(
                                     session_id,
                                     events=[{
