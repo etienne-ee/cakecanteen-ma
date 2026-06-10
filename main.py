@@ -475,7 +475,6 @@ def _search_wc_products(query: str, per_page: int = 10) -> list[dict]:
             params={
                 "search": query,
                 "per_page": min(per_page, 25),
-                "status": "publish",
                 "consumer_key": WC_CONSUMER_KEY,
                 "consumer_secret": WC_CONSUMER_SECRET,
             },
