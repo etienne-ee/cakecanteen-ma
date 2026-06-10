@@ -379,7 +379,11 @@ async def chat(session_id: str, body: ChatRequest):
         executor.submit(_run_stream)
 
         while True:
-            item = await queue.get()
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
 
             if item is None:
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -461,6 +465,7 @@ async def chat(session_id: str, body: ChatRequest):
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
         },
     )
 
