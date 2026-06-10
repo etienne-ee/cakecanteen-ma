@@ -249,7 +249,7 @@ async def lifespan(app: FastAPI):
             mcp_servers=[
                 {
                     "type": "url",
-                    "url": f"{PUBLIC_URL}/mcp",
+                    "url": f"{PUBLIC_URL}/mcp/",
                     "name": "woocommerce",
                 },
             ],
