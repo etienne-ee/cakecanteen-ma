@@ -16,6 +16,7 @@ from fastapi import FastAPI, HTTPException, Form, Request, Response, BackgroundT
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastmcp import FastMCP
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client as TwilioClient
@@ -28,7 +29,7 @@ ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY")
 WC_STORE_URL       = os.getenv("WC_STORE_URL", "https://cakecartcopy.electricegg.site/")
 WC_CONSUMER_KEY    = os.getenv("WC_CONSUMER_KEY")
 WC_CONSUMER_SECRET = os.getenv("WC_CONSUMER_SECRET")
-WC_MCP_URL         = os.getenv("WC_MCP_URL")  # public URL of the wc-mcp Railway service
+PUBLIC_URL         = os.getenv("PUBLIC_URL", "").rstrip("/")  # e.g. https://web-production-d8a27a.up.railway.app
 ALLOWED_ORIGINS    = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 STORE_OWNER_EMAIL  = os.getenv("STORE_OWNER_EMAIL")
 SMTP_HOST          = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -62,6 +63,45 @@ def _get_whatsapp_lock(phone_number: str) -> threading.Lock:
         if phone_number not in _whatsapp_locks:
             _whatsapp_locks[phone_number] = threading.Lock()
         return _whatsapp_locks[phone_number]
+
+# ── WooCommerce MCP server (mounted into the main FastAPI app at /mcp) ─────────
+
+wc_mcp = FastMCP("WooCommerce MCP")
+
+
+@wc_mcp.tool()
+def search_products(query: str, per_page: int = 10) -> str:
+    """Search for published products in the CakeCart WooCommerce store by keyword.
+    Returns product IDs, names, prices, images, stock status, and permalinks."""
+    per_page = min(per_page, 25)
+    with httpx.Client(timeout=10) as http:
+        resp = http.get(
+            f"{WC_STORE_URL.rstrip('/')}/wp-json/wc/v3/products",
+            params={
+                "search": query,
+                "per_page": per_page,
+                "consumer_key": WC_CONSUMER_KEY,
+                "consumer_secret": WC_CONSUMER_SECRET,
+            },
+            headers={"User-Agent": "Mozilla/5.0 (compatible; CakeCartBot/1.0)"},
+        )
+        resp.raise_for_status()
+        products = resp.json()
+        return json.dumps([
+            {
+                "id": p["id"],
+                "title": p["name"],
+                "price": f"R {float(p.get('price') or 0):.2f}",
+                "url": p.get("permalink", ""),
+                "image_url": p["images"][0]["src"] if p.get("images") else None,
+                "short_description": p.get("short_description", ""),
+                "stock_status": p.get("stock_status", "instock"),
+            }
+            for p in products
+        ])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
 
@@ -209,7 +249,7 @@ async def lifespan(app: FastAPI):
             mcp_servers=[
                 {
                     "type": "url",
-                    "url": f"{WC_MCP_URL.rstrip('/')}/mcp",
+                    "url": f"{PUBLIC_URL}/mcp",
                     "name": "woocommerce",
                 },
             ],
@@ -258,6 +298,7 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/mcp", wc_mcp.http_app(path="/"))
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
