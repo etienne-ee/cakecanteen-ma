@@ -28,6 +28,7 @@ ANTHROPIC_API_KEY  = os.getenv("ANTHROPIC_API_KEY")
 WC_STORE_URL       = os.getenv("WC_STORE_URL", "https://cakecartcopy.electricegg.site/")
 WC_CONSUMER_KEY    = os.getenv("WC_CONSUMER_KEY")
 WC_CONSUMER_SECRET = os.getenv("WC_CONSUMER_SECRET")
+WC_MCP_URL         = os.getenv("WC_MCP_URL")  # public URL of the wc-mcp Railway service
 ALLOWED_ORIGINS    = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 STORE_OWNER_EMAIL  = os.getenv("STORE_OWNER_EMAIL")
 SMTP_HOST          = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -205,29 +206,19 @@ async def lifespan(app: FastAPI):
             name="CakeCart Shopping Assistant",
             model={"id": "claude-sonnet-4-6"},
             system=SYSTEM_PROMPT,
-            tools=[
+            mcp_servers=[
                 {
-                    "type": "custom",
-                    "name": "search_products",
-                    "description": (
-                        "Search for products in the CakeCart WooCommerce store by keyword. "
-                        "Returns product IDs, names, prices, images, stock status, and permalinks."
-                    ),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Search term (e.g. 'chocolate cake', 'birthday cupcakes')",
-                            },
-                            "per_page": {
-                                "type": "integer",
-                                "description": "Number of results to return (max 25, default 10)",
-                                "default": 10,
-                            },
-                        },
-                        "required": ["query"],
-                    },
+                    "type": "url",
+                    "url": f"{WC_MCP_URL.rstrip('/')}/mcp",
+                    "name": "woocommerce",
+                },
+            ],
+            tools=[
+                {"type": "agent_toolset_20260401"},
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "woocommerce",
+                    "default_config": {"permission_policy": {"type": "always_allow"}},
                 },
             ],
         )
@@ -323,148 +314,105 @@ async def chat(session_id: str, body: ChatRequest):
 
     async def event_stream():
         loop = asyncio.get_event_loop()
-        pending_tool_result = None
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def _run_stream():
+            try:
+                with client.beta.sessions.events.stream(session_id) as stream:
+                    client.beta.sessions.events.send(
+                        session_id,
+                        events=[{
+                            "type": "user.message",
+                            "content": [{"type": "text", "text": body.message}],
+                        }],
+                    )
+                    for event in stream:
+                        loop.call_soon_threadsafe(queue.put_nowait, event)
+            except Exception as exc:
+                loop.call_soon_threadsafe(queue.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        executor.submit(_run_stream)
 
         while True:
-            queue: asyncio.Queue = asyncio.Queue()
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=15.0)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
 
-            if pending_tool_result is None:
-                send_events = [{
-                    "type": "user.message",
-                    "content": [{"type": "text", "text": body.message}],
-                }]
-            else:
-                send_events = [pending_tool_result]
-                pending_tool_result = None
+            if item is None:
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                break
 
-            def _run_stream(_send=send_events, _q=queue):
-                """Open one stream round; break early on tool call so caller can open a fresh stream."""
-                try:
-                    with client.beta.sessions.events.stream(session_id) as stream:
-                        client.beta.sessions.events.send(session_id, events=_send)
-                        for event in stream:
-                            if event.type == "agent.custom_tool_use" and event.name == "search_products":
-                                loop.call_soon_threadsafe(_q.put_nowait, ("tool", event))
-                                break  # exit stream; new stream opened after tool result
-                            else:
-                                loop.call_soon_threadsafe(_q.put_nowait, ("event", event))
-                except Exception as exc:
-                    loop.call_soon_threadsafe(_q.put_nowait, ("error", exc))
-                finally:
-                    loop.call_soon_threadsafe(_q.put_nowait, ("sentinel", None))
+            if isinstance(item, Exception):
+                yield f"data: {json.dumps({'type': 'error', 'message': str(item)})}\n\n"
+                break
 
-            executor.submit(_run_stream)
+            event = item
 
-            # Drain this stream round
-            while True:
-                try:
-                    kind, item = await asyncio.wait_for(queue.get(), timeout=15.0)
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-                    continue
+            if event.type == "agent.message":
+                for block in event.content:
+                    text = getattr(block, "text", None)
+                    if not text:
+                        continue
 
-                if kind == "sentinel":
-                    break
+                    # Order block — create WooCommerce order and emit confirmation
+                    order_match = re.search(r"```order\s*(\{.*?\})\s*```", text, re.DOTALL)
+                    if order_match:
+                        clean_text = text[:order_match.start()].rstrip()
+                        if clean_text:
+                            yield f"data: {json.dumps({'type': 'text', 'content': clean_text})}\n\n"
+                        try:
+                            order_data = json.loads(order_match.group(1))
+                            result = await loop.run_in_executor(
+                                executor, lambda: _create_wc_order(order_data)
+                            )
+                            order_num = result.get("number") or result.get("id")
+                            yield f"data: {json.dumps({'type': 'order_confirmed', 'order_number': order_num})}\n\n"
+                        except Exception as exc:
+                            yield f"data: {json.dumps({'type': 'error', 'message': f'Could not place order: {exc}'})}\n\n"
+                        continue
 
-                if kind == "error":
-                    yield f"data: {json.dumps({'type': 'error', 'message': str(item)})}\n\n"
-                    return
-
-                if kind == "tool":
-                    event = item
-                    query = event.input.get("query", "")
-                    per_page = min(int(event.input.get("per_page", 10)), 25)
-                    print(f"[TOOL] search_products called — query={query!r} per_page={per_page} event_id={event.id}")
-                    yield f"data: {json.dumps({'type': 'tool', 'name': event.name})}\n\n"
-                    try:
-                        results = await loop.run_in_executor(
-                            executor, lambda q=query, p=per_page: _search_wc_products(q, p)
-                        )
-                        print(f"[TOOL] WooCommerce returned {len(results)} products — opening new stream")
-                        pending_tool_result = {
-                            "type": "user.custom_tool_result",
-                            "custom_tool_use_id": event.id,
-                            "content": [{"type": "text", "text": json.dumps(results)}],
-                        }
-                    except Exception as exc:
-                        print(f"[TOOL] ERROR — {exc}")
-                        pending_tool_result = {
-                            "type": "user.custom_tool_result",
-                            "custom_tool_use_id": event.id,
-                            "is_error": True,
-                            "content": [{"type": "text", "text": str(exc)}],
-                        }
-                    continue
-
-                # kind == "event"
-                event = item
-
-                if event.type == "agent.message":
-                    for block in event.content:
-                        text = getattr(block, "text", None)
-                        if not text:
-                            continue
-
-                        # Order block — create WooCommerce order and emit confirmation
-                        order_match = re.search(r"```order\s*(\{.*?\})\s*```", text, re.DOTALL)
-                        if order_match:
-                            clean_text = text[:order_match.start()].rstrip()
-                            if clean_text:
-                                yield f"data: {json.dumps({'type': 'text', 'content': clean_text})}\n\n"
-                            try:
-                                order_data = json.loads(order_match.group(1))
-                                result = await loop.run_in_executor(
-                                    executor, lambda: _create_wc_order(order_data)
-                                )
-                                order_num = result.get("number") or result.get("id")
-                                yield f"data: {json.dumps({'type': 'order_confirmed', 'order_number': order_num})}\n\n"
-                            except Exception as exc:
-                                yield f"data: {json.dumps({'type': 'error', 'message': f'Could not place order: {exc}'})}\n\n"
-                            continue
-
-                        # Defective report block — send email to store owner
-                        defect_match = re.search(r"```defective_report\s*(\{.*?\})\s*```", text, re.DOTALL)
-                        if defect_match:
-                            clean_text = text[:defect_match.start()].rstrip()
-                            if clean_text:
-                                yield f"data: {json.dumps({'type': 'text', 'content': clean_text})}\n\n"
-                            sent = False
-                            order_number = None
-                            try:
-                                report = json.loads(defect_match.group(1))
-                                order_number = report.get("order_number")
-                                sent = await loop.run_in_executor(executor, lambda: _send_defect_email(report))
-                            except Exception as exc:
-                                print(f"[email] Failed to parse/send defect report: {exc}")
-                            if sent:
-                                yield f"data: {json.dumps({'type': 'defect_reported', 'order_number': order_number})}\n\n"
-                            else:
-                                yield f"data: {json.dumps({'type': 'error', 'message': 'We could not submit your report right now. Please contact us directly or try again shortly.'})}\n\n"
-                            continue
-
-                        # Products block — emit product cards
-                        prod_match = re.search(r"```products\s*(\[.*?\])\s*```", text, re.DOTALL)
-                        if prod_match:
-                            clean_text = text[:prod_match.start()].rstrip()
-                            if clean_text:
-                                yield f"data: {json.dumps({'type': 'text', 'content': clean_text})}\n\n"
-                            try:
-                                products = json.loads(prod_match.group(1))
-                                yield f"data: {json.dumps({'type': 'products', 'products': products})}\n\n"
-                            except json.JSONDecodeError:
-                                pass
+                    # Defective report block — send email to store owner
+                    defect_match = re.search(r"```defective_report\s*(\{.*?\})\s*```", text, re.DOTALL)
+                    if defect_match:
+                        clean_text = text[:defect_match.start()].rstrip()
+                        if clean_text:
+                            yield f"data: {json.dumps({'type': 'text', 'content': clean_text})}\n\n"
+                        sent = False
+                        order_number = None
+                        try:
+                            report = json.loads(defect_match.group(1))
+                            order_number = report.get("order_number")
+                            sent = await loop.run_in_executor(executor, lambda: _send_defect_email(report))
+                        except Exception as exc:
+                            print(f"[email] Failed to parse/send defect report: {exc}")
+                        if sent:
+                            yield f"data: {json.dumps({'type': 'defect_reported', 'order_number': order_number})}\n\n"
                         else:
-                            yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
+                            yield f"data: {json.dumps({'type': 'error', 'message': 'We could not submit your report right now. Please contact us directly or try again shortly.'})}\n\n"
+                        continue
 
-                elif event.type == "agent.custom_tool_use":
-                    yield f"data: {json.dumps({'type': 'tool', 'name': event.name})}\n\n"
+                    # Products block — emit product cards
+                    prod_match = re.search(r"```products\s*(\[.*?\])\s*```", text, re.DOTALL)
+                    if prod_match:
+                        clean_text = text[:prod_match.start()].rstrip()
+                        if clean_text:
+                            yield f"data: {json.dumps({'type': 'text', 'content': clean_text})}\n\n"
+                        try:
+                            products = json.loads(prod_match.group(1))
+                            yield f"data: {json.dumps({'type': 'products', 'products': products})}\n\n"
+                        except json.JSONDecodeError:
+                            pass
+                    else:
+                        yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
 
-                elif event.type == "session.status_idle":
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                    return
+            elif event.type == "agent.tool_use":
+                yield f"data: {json.dumps({'type': 'tool', 'name': event.name})}\n\n"
 
-            # Sentinel received — loop again if tool result pending, else done
-            if pending_tool_result is None:
+            elif event.type == "session.status_idle":
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 break
 
