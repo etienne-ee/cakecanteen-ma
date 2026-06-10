@@ -478,6 +478,7 @@ def _search_wc_products(query: str, per_page: int = 10) -> list[dict]:
                 "consumer_key": WC_CONSUMER_KEY,
                 "consumer_secret": WC_CONSUMER_SECRET,
             },
+            headers={"User-Agent": "Mozilla/5.0 (compatible; CakeCartBot/1.0)"},
         )
         resp.raise_for_status()
         products = resp.json()
