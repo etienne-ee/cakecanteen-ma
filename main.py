@@ -219,72 +219,76 @@ Rules:
 - Only output the block once you have both the order number and a description of the issue.
 """
 
+# Create MCP HTTP app once so its lifespan can be wired into FastAPI's lifespan
+mcp_http_app = wc_mcp.http_app(path="/")
+
 # ── Lifespan: create agent + environment once on startup ──────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global agent_id, environment_id
+    async with mcp_http_app.lifespan(app):
+        global agent_id, environment_id
 
-    saved_agent_id = os.getenv("AGENT_ID")
-    saved_env_id   = os.getenv("ENVIRONMENT_ID")
+        saved_agent_id = os.getenv("AGENT_ID")
+        saved_env_id   = os.getenv("ENVIRONMENT_ID")
 
-    if saved_agent_id and saved_env_id:
-        try:
-            client.beta.agents.retrieve(saved_agent_id)
-            client.beta.environments.retrieve(saved_env_id)
-            agent_id       = saved_agent_id
-            environment_id = saved_env_id
-            print(f"♻️  Reusing agent:       {agent_id}")
-            print(f"♻️  Reusing environment: {environment_id}")
-        except Exception:
-            print("⚠️  Saved IDs are stale — creating new agent and environment...")
-            saved_agent_id = saved_env_id = None
+        if saved_agent_id and saved_env_id:
+            try:
+                client.beta.agents.retrieve(saved_agent_id)
+                client.beta.environments.retrieve(saved_env_id)
+                agent_id       = saved_agent_id
+                environment_id = saved_env_id
+                print(f"♻️  Reusing agent:       {agent_id}")
+                print(f"♻️  Reusing environment: {environment_id}")
+            except Exception:
+                print("⚠️  Saved IDs are stale — creating new agent and environment...")
+                saved_agent_id = saved_env_id = None
 
-    if not saved_agent_id or not saved_env_id:
-        print("🚀 Starting up — creating Claude Managed Agent...")
+        if not saved_agent_id or not saved_env_id:
+            print("🚀 Starting up — creating Claude Managed Agent...")
 
-        agent = client.beta.agents.create(
-            name="CakeCart Shopping Assistant",
-            model={"id": "claude-sonnet-4-6"},
-            system=SYSTEM_PROMPT,
-            mcp_servers=[
-                {
-                    "type": "url",
-                    "url": f"{PUBLIC_URL}/mcp/",
-                    "name": "woocommerce",
+            agent = client.beta.agents.create(
+                name="CakeCart Shopping Assistant",
+                model={"id": "claude-sonnet-4-6"},
+                system=SYSTEM_PROMPT,
+                mcp_servers=[
+                    {
+                        "type": "url",
+                        "url": f"{PUBLIC_URL}/mcp/",
+                        "name": "woocommerce",
+                    },
+                ],
+                tools=[
+                    {"type": "agent_toolset_20260401"},
+                    {
+                        "type": "mcp_toolset",
+                        "mcp_server_name": "woocommerce",
+                        "default_config": {"permission_policy": {"type": "always_allow"}},
+                    },
+                ],
+            )
+            agent_id = agent.id
+            print(f"✅ Agent created: {agent_id}")
+
+            env = client.beta.environments.create(
+                name="cakecart-agent-env",
+                config={
+                    "type": "cloud",
+                    "networking": {"type": "unrestricted"},
                 },
-            ],
-            tools=[
-                {"type": "agent_toolset_20260401"},
-                {
-                    "type": "mcp_toolset",
-                    "mcp_server_name": "woocommerce",
-                    "default_config": {"permission_policy": {"type": "always_allow"}},
-                },
-            ],
-        )
-        agent_id = agent.id
-        print(f"✅ Agent created: {agent_id}")
+            )
+            environment_id = env.id
+            print(f"✅ Environment created: {environment_id}")
 
-        env = client.beta.environments.create(
-            name="cakecart-agent-env",
-            config={
-                "type": "cloud",
-                "networking": {"type": "unrestricted"},
-            },
-        )
-        environment_id = env.id
-        print(f"✅ Environment created: {environment_id}")
+            set_key(ENV_FILE, "AGENT_ID", agent_id)
+            set_key(ENV_FILE, "ENVIRONMENT_ID", environment_id)
+            print("💾 IDs saved to .env")
 
-        set_key(ENV_FILE, "AGENT_ID", agent_id)
-        set_key(ENV_FILE, "ENVIRONMENT_ID", environment_id)
-        print("💾 IDs saved to .env")
+        print(f"🛒 Connected to WooCommerce store: {WC_STORE_URL}")
+        print("🟢 Ready — server is running\n")
 
-    print(f"🛒 Connected to WooCommerce store: {WC_STORE_URL}")
-    print("🟢 Ready — server is running\n")
+        yield
 
-    yield
-
-    print("🔴 Shutting down")
+        print("🔴 Shutting down")
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -298,7 +302,7 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/mcp", wc_mcp.http_app(path="/"))
+app.mount("/mcp", mcp_http_app)
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
