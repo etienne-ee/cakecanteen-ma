@@ -7,7 +7,6 @@ from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 
 import anthropic
-import resend
 import httpx
 from dotenv import load_dotenv, set_key
 from fastapi import FastAPI, HTTPException, Form, Request, Response, BackgroundTasks
@@ -32,9 +31,6 @@ ALLOWED_ORIGINS    = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 STORE_OWNER_EMAIL  = os.getenv("STORE_OWNER_EMAIL")
 RESEND_API_KEY     = os.getenv("RESEND_API_KEY")
 RESEND_FROM        = os.getenv("RESEND_FROM", "CakeCart <onboarding@resend.dev>")
-
-if RESEND_API_KEY:
-    resend.api_key = RESEND_API_KEY
 
 TWILIO_ACCOUNT_SID   = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN    = os.getenv("TWILIO_AUTH_TOKEN")
@@ -602,7 +598,7 @@ def _create_wc_order(order_data: dict) -> dict:
 
 
 def _send_defect_email(report: dict) -> bool:
-    """Send a defective order notification to the store owner via Resend.
+    """Send a defective order notification to the store owner via Resend REST API.
     Returns True on success, False on any failure."""
     if not RESEND_API_KEY or not STORE_OWNER_EMAIL:
         print("[email] RESEND_API_KEY or STORE_OWNER_EMAIL not set — skipping email")
@@ -617,12 +613,18 @@ def _send_defect_email(report: dict) -> bool:
     )
 
     try:
-        resend.Emails.send({
-            "from": RESEND_FROM,
-            "to": STORE_OWNER_EMAIL,
-            "subject": f"⚠️ Defective order report — #{report.get('order_number', 'unknown')}",
-            "html": html,
-        })
+        with httpx.Client(timeout=15) as http:
+            resp = http.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                json={
+                    "from": RESEND_FROM,
+                    "to": [STORE_OWNER_EMAIL],
+                    "subject": f"⚠️ Defective order — #{report.get('order_number', 'unknown')}",
+                    "html": html,
+                },
+            )
+            resp.raise_for_status()
         print(f"[email] Defect report sent for order {report.get('order_number')}")
         return True
     except Exception as exc:
