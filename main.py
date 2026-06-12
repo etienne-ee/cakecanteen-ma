@@ -121,6 +121,23 @@ def search_products(query: str, category_id: int = 0, per_page: int = 10) -> str
     ])
 
 
+@wc_mcp.tool()
+def report_defect(order_number: str, customer_name: str, issue: str, contact: str) -> str:
+    """Report a defective, damaged, or wrong order to the store team by email.
+    Call this once you have the customer's order number, their name, a description
+    of the issue, and a contact detail (email or phone).
+    Returns a confirmation string indicating whether the report was sent."""
+    sent = _send_defect_email({
+        "order_number": order_number,
+        "customer_name": customer_name,
+        "issue": issue,
+        "contact": contact,
+    })
+    if sent:
+        return f"Report sent successfully for order #{order_number}. The store team has been notified and will follow up with {contact}."
+    return "Could not send report — email is not configured on the server. Advise the customer to contact the store directly."
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
@@ -261,23 +278,14 @@ Rules:
 
 If a customer reports receiving a defective, damaged, or wrong item:
 1. Apologise sincerely and empathetically.
-2. Ask for their order number and a brief description of the problem (if they haven't already provided both).
-3. Once you have both, say something like "I'm logging this with the store team now." — do NOT claim the team has been notified or that an email has been sent, because the system confirms that separately.
-4. Output this block at the very end of your message and nothing after it:
-
-```defective_report
-{{
-  "customer_name": "...",
-  "order_number": "...",
-  "issue": "...",
-  "contact": "..."
-}}
-```
+2. Ask for their order number, a brief description of the problem, and a contact detail (email or phone) — if they haven't already provided them.
+3. Once you have all three, call the `report_defect` tool immediately.
+4. After the tool returns, tell the customer the report has been submitted and the store team will follow up with them.
 
 Rules:
-- customer_name and contact are whatever the customer shared (name, phone, email — whatever is available).
-- issue is a short description of the problem in the customer's own words.
-- Only output the block once you have both the order number and a description of the issue.
+- Use whatever contact detail the customer has shared (email, phone — whatever is available).
+- Only call report_defect once you have the order number, issue description, and a contact detail.
+- Do not tell the customer the report was submitted before the tool has returned successfully.
 """
 
 # Create MCP HTTP app once so its lifespan can be wired into FastAPI's lifespan
@@ -483,26 +491,6 @@ async def chat(session_id: str, body: ChatRequest):
                             yield f"data: {json.dumps({'type': 'order_confirmed', 'order_number': order_num})}\n\n"
                         except Exception as exc:
                             yield f"data: {json.dumps({'type': 'error', 'message': f'Could not place order: {exc}'})}\n\n"
-                        continue
-
-                    # Defective report block — send email to store owner
-                    defect_match = re.search(r"```defective_report\s*(\{.*?\})\s*```", text, re.DOTALL)
-                    if defect_match:
-                        clean_text = text[:defect_match.start()].rstrip()
-                        if clean_text:
-                            yield f"data: {json.dumps({'type': 'text', 'content': clean_text})}\n\n"
-                        sent = False
-                        order_number = None
-                        try:
-                            report = json.loads(defect_match.group(1))
-                            order_number = report.get("order_number")
-                            sent = await loop.run_in_executor(executor, lambda: _send_defect_email(report))
-                        except Exception as exc:
-                            print(f"[email] Failed to parse/send defect report: {exc}")
-                        if sent:
-                            yield f"data: {json.dumps({'type': 'defect_reported', 'order_number': order_number})}\n\n"
-                        else:
-                            yield f"data: {json.dumps({'type': 'error', 'message': 'We could not submit your report right now. Please contact us directly or try again shortly.'})}\n\n"
                         continue
 
                     # Products block — emit product cards
