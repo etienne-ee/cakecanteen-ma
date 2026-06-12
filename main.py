@@ -2,14 +2,12 @@ import os
 import json
 import asyncio
 import re
-import smtplib
 import threading
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 import anthropic
+import resend
 import httpx
 from dotenv import load_dotenv, set_key
 from fastapi import FastAPI, HTTPException, Form, Request, Response, BackgroundTasks
@@ -32,10 +30,11 @@ WC_CONSUMER_SECRET = os.getenv("WC_CONSUMER_SECRET")
 PUBLIC_URL         = os.getenv("PUBLIC_URL", "").rstrip("/")  # e.g. https://web-production-d8a27a.up.railway.app
 ALLOWED_ORIGINS    = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 STORE_OWNER_EMAIL  = os.getenv("STORE_OWNER_EMAIL")
-SMTP_HOST          = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT          = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER          = os.getenv("SMTP_USER")
-SMTP_PASSWORD      = os.getenv("SMTP_PASSWORD")
+RESEND_API_KEY     = os.getenv("RESEND_API_KEY")
+RESEND_FROM        = os.getenv("RESEND_FROM", "CakeCart <onboarding@resend.dev>")
+
+if RESEND_API_KEY:
+    resend.api_key = RESEND_API_KEY
 
 TWILIO_ACCOUNT_SID   = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN    = os.getenv("TWILIO_AUTH_TOKEN")
@@ -603,16 +602,11 @@ def _create_wc_order(order_data: dict) -> dict:
 
 
 def _send_defect_email(report: dict) -> bool:
-    """Send a defective order notification to the store owner via SMTP.
+    """Send a defective order notification to the store owner via Resend.
     Returns True on success, False on any failure."""
-    if not SMTP_USER or not SMTP_PASSWORD or not STORE_OWNER_EMAIL:
-        print("[email] SMTP credentials or STORE_OWNER_EMAIL not set — skipping email")
+    if not RESEND_API_KEY or not STORE_OWNER_EMAIL:
+        print("[email] RESEND_API_KEY or STORE_OWNER_EMAIL not set — skipping email")
         return False
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"⚠️ Defective order report — {report.get('order_number', 'unknown')}"
-    msg["From"]    = SMTP_USER
-    msg["To"]      = STORE_OWNER_EMAIL
 
     html = (
         f"<h2>⚠️ Defective Order Report</h2>"
@@ -621,14 +615,14 @@ def _send_defect_email(report: dict) -> bool:
         f"<p><strong>Issue:</strong> {report.get('issue', 'No description')}</p>"
         f"<p><strong>Contact:</strong> {report.get('contact', 'Not provided')}</p>"
     )
-    msg.attach(MIMEText(html, "html"))
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(SMTP_USER, STORE_OWNER_EMAIL, msg.as_string())
+        resend.Emails.send({
+            "from": RESEND_FROM,
+            "to": STORE_OWNER_EMAIL,
+            "subject": f"⚠️ Defective order report — #{report.get('order_number', 'unknown')}",
+            "html": html,
+        })
         print(f"[email] Defect report sent for order {report.get('order_number')}")
         return True
     except Exception as exc:
