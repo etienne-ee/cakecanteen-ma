@@ -74,12 +74,15 @@ def search_products(query: str, per_page: int = 10) -> str:
     """Search for published products in the CakeCart WooCommerce store by keyword.
     Returns product IDs, names, prices, images, stock status, and permalinks."""
     per_page = min(per_page, 25)
+    query_words = [w.lower() for w in query.split() if len(w) > 2]
+
     with httpx.Client(timeout=10) as http:
         resp = http.get(
             f"{WC_STORE_URL.rstrip('/')}/wp-json/wc/v3/products",
             params={
                 "search": query,
                 "per_page": per_page,
+                "status": "publish",
                 "consumer_key": WC_CONSUMER_KEY,
                 "consumer_secret": WC_CONSUMER_SECRET,
             },
@@ -87,18 +90,26 @@ def search_products(query: str, per_page: int = 10) -> str:
         )
         resp.raise_for_status()
         products = resp.json()
-        return json.dumps([
-            {
-                "id": p["id"],
-                "title": p["name"],
-                "price": f"R {float(p.get('price') or 0):.2f}",
-                "url": p.get("permalink", ""),
-                "image_url": p["images"][0]["src"] if p.get("images") else None,
-                "short_description": p.get("short_description", ""),
-                "stock_status": p.get("stock_status", "instock"),
-            }
-            for p in products
-        ])
+
+    # Bubble up products whose title contains the most query words
+    def _title_score(p: dict) -> int:
+        title = p["name"].lower()
+        return sum(1 for w in query_words if w in title)
+
+    products = sorted(products, key=_title_score, reverse=True)
+
+    return json.dumps([
+        {
+            "id": p["id"],
+            "title": p["name"],
+            "price": f"R {float(p.get('price') or 0):.2f}",
+            "url": p.get("permalink", ""),
+            "image_url": p["images"][0]["src"] if p.get("images") else None,
+            "short_description": p.get("short_description", ""),
+            "stock_status": p.get("stock_status", "instock"),
+        }
+        for p in products
+    ])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
