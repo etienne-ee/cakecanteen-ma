@@ -10,7 +10,7 @@
     }
     #ai-chat-toggle {
       width: 56px; height: 56px; border-radius: 50%;
-      background: #111; color: #fff; border: none; cursor: pointer;
+      background: #EC008C; color: #fff; border: none; cursor: pointer;
       display: flex; align-items: center; justify-content: center;
       box-shadow: 0 4px 16px rgba(0,0,0,0.25);
       transition: transform 0.2s, box-shadow 0.2s; margin-left: auto;
@@ -30,7 +30,7 @@
       to   { opacity: 1; transform: translateY(0); }
     }
     #ai-chat-header {
-      background: #111; color: #fff;
+      background: #EC008C; color: #fff;
       padding: 14px 16px; display: flex; align-items: center;
     }
     #ai-chat-header-info { display: flex; align-items: center; gap: 10px; }
@@ -52,7 +52,7 @@
     }
     .ai-msg a { color: inherit; text-decoration: underline; }
     .ai-msg--user {
-      background: #111; color: #fff;
+      background: #EC008C; color: #fff;
       align-self: flex-end; border-bottom-right-radius: 4px;
     }
     .ai-msg--assistant {
@@ -79,14 +79,14 @@
       border: 1.5px solid #e0e0e0; border-radius: 24px;
       font-size: 14px; outline: none; transition: border-color 0.15s;
     }
-    #ai-chat-input:focus { border-color: #111; }
+    #ai-chat-input:focus { border-color: #EC008C; }
     #ai-chat-send {
       width: 38px; height: 38px; border-radius: 50%;
-      background: #111; color: #fff; border: none; cursor: pointer;
+      background: #EC008C; color: #fff; border: none; cursor: pointer;
       display: flex; align-items: center; justify-content: center;
       flex-shrink: 0; transition: background 0.15s;
     }
-    #ai-chat-send:hover    { background: #333; }
+    #ai-chat-send:hover    { background: #C70074; }
     #ai-chat-send:disabled { background: #ccc; cursor: default; }
     .ai-order-confirmed {
       background: #f0fdf4; border: 1.5px solid #86efac;
@@ -105,6 +105,13 @@
     .ai-defect-reported__icon  { font-size: 20px; }
     .ai-defect-reported__title { font-weight: 700; font-size: 14px; color: #92400e; }
     .ai-defect-reported__note  { font-size: 12px; color: #b45309; margin-top: 2px; }
+    #ai-chat-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+    .ai-chip {
+      border: 1.5px solid #EC008C; color: #EC008C; background: #fff;
+      border-radius: 16px; padding: 7px 12px; font-size: 13px;
+      cursor: pointer; transition: background 0.15s, color 0.15s; white-space: nowrap;
+    }
+    .ai-chip:hover { background: #EC008C; color: #fff; }
     .ai-product-grid {
       display: grid; grid-template-columns: repeat(2, 1fr);
       gap: 8px; width: 100%; margin-top: 4px;
@@ -126,7 +133,7 @@
     .ai-product-card__price { font-size: 12px; color: #555; margin-top: 2px; }
     .ai-product-card__cta {
       margin-top: 6px; font-size: 11px; font-weight: 600;
-      color: #fff; background: #111; border-radius: 6px; padding: 4px 8px; text-align: center;
+      color: #fff; background: #EC008C; border-radius: 6px; padding: 4px 8px; text-align: center;
     }
   `;
   document.head.appendChild(style);
@@ -157,9 +164,10 @@
         </div>
       </div>
       <div id="ai-chat-messages">
-        <div class="ai-msg ai-msg--assistant">
-          Hi! I can help you find products, check prices, and place your order. What are you looking for?
-        </div>
+        <div class="ai-msg ai-msg--assistant">Hi there! 🍰 Welcome to CakeCanteen!
+
+Craving something sweet? 😋 Ask me anything — I can help you find the perfect cake, check prices, place an order, or sort out a question about a delivery or existing order. What can I help you with today? 🎂</div>
+        <div id="ai-chat-suggestions"></div>
       </div>
       <div id="ai-chat-typing" style="display:none">
         <span></span><span></span><span></span>
@@ -200,14 +208,29 @@
     if (last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
   }
 
-  const toggle    = document.getElementById('ai-chat-toggle');
-  const window_   = document.getElementById('ai-chat-window');
-  const messages  = document.getElementById('ai-chat-messages');
-  const input     = document.getElementById('ai-chat-input');
-  const sendBtn   = document.getElementById('ai-chat-send');
-  const typing    = document.getElementById('ai-chat-typing');
-  const iconOpen  = document.getElementById('ai-chat-icon-open');
-  const iconClose = document.getElementById('ai-chat-icon-close');
+  const toggle      = document.getElementById('ai-chat-toggle');
+  const window_     = document.getElementById('ai-chat-window');
+  const messages    = document.getElementById('ai-chat-messages');
+  const input       = document.getElementById('ai-chat-input');
+  const sendBtn     = document.getElementById('ai-chat-send');
+  const typing      = document.getElementById('ai-chat-typing');
+  const iconOpen    = document.getElementById('ai-chat-icon-open');
+  const iconClose   = document.getElementById('ai-chat-icon-close');
+  const suggestions = document.getElementById('ai-chat-suggestions');
+
+  const CHIPS = [
+    { label: '🎂 Find a cake',            message: "I'm looking for a cake — what do you have?" },
+    { label: '🚚 Delivery & collection',  message: 'Can you tell me about delivery and collection options?' },
+    { label: '📦 Ask about my order',     message: 'I have a question about my order.' },
+    { label: '😟 Report a problem',       message: 'My order arrived damaged.' },
+  ];
+  CHIPS.forEach(({ label, message }) => {
+    const btn = document.createElement('button');
+    btn.className = 'ai-chip';
+    btn.textContent = label;
+    btn.addEventListener('click', () => { input.value = message; sendMessage(); });
+    suggestions.appendChild(btn);
+  });
 
   async function ensureSession() {
     if (sessionId) return;
@@ -284,11 +307,10 @@
 
       const info = document.createElement('div');
       info.className = 'ai-product-card__info';
-      info.innerHTML = `
-        <div class="ai-product-card__title">${(p.title||'').replace(/</g,'&lt;')}</div>
-        <div class="ai-product-card__price">${(p.price||'').replace(/</g,'&lt;')}</div>
-        <div class="ai-product-card__cta">View product &rarr;</div>
-      `;
+      const titleEl = document.createElement('div'); titleEl.className = 'ai-product-card__title'; titleEl.textContent = p.title || '';
+      const priceEl = document.createElement('div'); priceEl.className = 'ai-product-card__price'; priceEl.textContent = p.price || '';
+      const ctaEl   = document.createElement('div'); ctaEl.className   = 'ai-product-card__cta';   ctaEl.textContent = 'View product →';
+      info.append(titleEl, priceEl, ctaEl);
       a.append(img, info);
       grid.appendChild(a);
     });
@@ -303,6 +325,7 @@
     isBusy = true;
     input.value = '';
     sendBtn.disabled = true;
+    suggestions.style.display = 'none';
     appendMessage('user', text);
 
     typing.style.display = 'flex';
