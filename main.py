@@ -70,33 +70,42 @@ wc_mcp = FastMCP("WooCommerce MCP")
 
 
 @wc_mcp.tool()
-def search_products(query: str, per_page: int = 10) -> str:
-    """Search for published products in the CakeCart WooCommerce store by keyword.
+def search_products(query: str, category_id: int = 0, per_page: int = 10) -> str:
+    """Search for published products in the CakeCart WooCommerce store.
+    Pass category_id to filter by product category (preferred for type/flavour queries).
+    Pass query for keyword search within a category or across all products.
     Returns product IDs, names, prices, images, stock status, and permalinks."""
     per_page = min(per_page, 25)
-    query_words = [w.lower() for w in query.split() if len(w) > 2]
+
+    params: dict = {
+        "per_page": 50,
+        "status": "publish",
+        "consumer_key": WC_CONSUMER_KEY,
+        "consumer_secret": WC_CONSUMER_SECRET,
+    }
+    if query:
+        params["search"] = query
+    if category_id:
+        params["category"] = str(category_id)
 
     with httpx.Client(timeout=10) as http:
         resp = http.get(
             f"{WC_STORE_URL.rstrip('/')}/wp-json/wc/v3/products",
-            params={
-                "search": query,
-                "per_page": per_page,
-                "status": "publish",
-                "consumer_key": WC_CONSUMER_KEY,
-                "consumer_secret": WC_CONSUMER_SECRET,
-            },
+            params=params,
             headers={"User-Agent": "Mozilla/5.0 (compatible; CakeCartBot/1.0)"},
         )
         resp.raise_for_status()
         products = resp.json()
 
-    # Bubble up products whose title contains the most query words
-    def _title_score(p: dict) -> int:
-        title = p["name"].lower()
-        return sum(1 for w in query_words if w in title)
+    # When doing a keyword search without a category, prefer title matches
+    if query and not category_id:
+        query_words = [w.lower() for w in query.split() if len(w) > 2]
 
-    products = sorted(products, key=_title_score, reverse=True)
+        def _title_score(p: dict) -> int:
+            return sum(1 for w in query_words if w in p["name"].lower())
+
+        title_hits = [p for p in products if _title_score(p) > 0]
+        products = sorted(title_hits or products, key=_title_score, reverse=True)
 
     return json.dumps([
         {
@@ -108,7 +117,7 @@ def search_products(query: str, per_page: int = 10) -> str:
             "short_description": p.get("short_description", ""),
             "stock_status": p.get("stock_status", "instock"),
         }
-        for p in products
+        for p in products[:per_page]
     ])
 
 
@@ -119,7 +128,41 @@ ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
 agent_id: str | None = None
 environment_id: str | None = None
 
-SYSTEM_PROMPT = f"""You are a friendly and helpful shopping assistant for CakeCart.
+
+def _fetch_wc_categories() -> list[dict]:
+    """Fetch all non-empty product categories from WooCommerce at startup."""
+    try:
+        with httpx.Client(timeout=10) as http:
+            resp = http.get(
+                f"{WC_STORE_URL.rstrip('/')}/wp-json/wc/v3/products/categories",
+                params={
+                    "per_page": 100,
+                    "consumer_key": WC_CONSUMER_KEY,
+                    "consumer_secret": WC_CONSUMER_SECRET,
+                },
+            )
+            resp.raise_for_status()
+            return [
+                {"id": c["id"], "name": c["name"], "count": c["count"]}
+                for c in resp.json()
+                if c["count"] > 0 and c["name"] != "Uncategorized"
+            ]
+    except Exception as exc:
+        print(f"⚠️  Could not fetch categories: {exc}")
+        return []
+
+
+def _build_system_prompt(categories: list[dict]) -> str:
+    cat_lines = "\n".join(
+        f'  - {c["name"]} (category_id: {c["id"]}, {c["count"]} products)'
+        for c in categories
+    )
+    categories_section = (
+        f"## Product categories\n\nUse these category IDs with search_products:\n\n{cat_lines}\n"
+        if cat_lines
+        else ""
+    )
+    return f"""You are a friendly and helpful shopping assistant for CakeCart.
 
 Your job is to help customers:
 - Search and discover products using natural language
@@ -130,16 +173,22 @@ Your job is to help customers:
 Always be warm, conversational, and focused on finding the right product quickly.
 Store URL: {WC_STORE_URL}
 
+{categories_section}
 ## Search strategy
 
 Always call search_products with per_page set to 10 or less — never exceed 25.
 
-Use this approach:
-1. Search with the customer's specific keywords first (e.g. "chocolate cake", "birthday cupcakes").
-2. If that returns 0 products, try a broader category term.
-3. If still 0 results, try the most general term available as a last resort.
+When a customer asks for a specific type or flavour of product, use the matching category_id
+from the list above — this is more accurate than a keyword search alone.
+Examples:
+- "Do you have chocolate cake?" → search_products(category_id=<chocolate category id>)
+- "Show me birthday cakes" → search_products(category_id=<birthday category id>)
+- "Any vegan options?" → search_products(category_id=<vegan category id>)
 
-Never tell a customer a product doesn't exist based on a single failed search. Try at least two searches before concluding something is unavailable.
+If no category clearly matches, fall back to a keyword query:
+1. Search with the customer's specific keywords first.
+2. If that returns 0 products, try a broader term.
+3. Never tell a customer something doesn't exist based on a single failed search — try at least two searches first.
 
 ## Product cards
 
@@ -257,10 +306,14 @@ async def lifespan(app: FastAPI):
         if not saved_agent_id or not saved_env_id:
             print("🚀 Starting up — creating Claude Managed Agent...")
 
+            categories = _fetch_wc_categories()
+            print(f"📂 Loaded {len(categories)} product categories")
+            system_prompt = _build_system_prompt(categories)
+
             agent = client.beta.agents.create(
                 name="CakeCart Shopping Assistant",
                 model={"id": "claude-sonnet-4-6"},
-                system=SYSTEM_PROMPT,
+                system=system_prompt,
                 mcp_servers=[
                     {
                         "type": "url",
