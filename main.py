@@ -140,6 +140,7 @@ def _fetch_wc_categories() -> list[dict]:
                     "consumer_key": WC_CONSUMER_KEY,
                     "consumer_secret": WC_CONSUMER_SECRET,
                 },
+                headers={"User-Agent": "Mozilla/5.0 (compatible; CakeCartBot/1.0)"},
             )
             resp.raise_for_status()
             return [
