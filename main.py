@@ -175,7 +175,9 @@ def _build_system_prompt(categories: list[dict]) -> str:
         if cat_lines
         else ""
     )
-    return f"""You are a friendly and helpful shopping assistant for CakeCart.
+    return f"""Do not use markdown formatting in your responses — no bold, no bullet points, no headers. Write in plain conversational text only.
+
+You are a friendly and helpful shopping assistant for CakeCart.
 
 Your job is to help customers:
 - Search and discover products using natural language
@@ -326,7 +328,6 @@ async def lifespan(app: FastAPI):
                     },
                 ],
                 tools=[
-                    {"type": "agent_toolset_20260401"},
                     {
                         "type": "mcp_toolset",
                         "mcp_server_name": "woocommerce",
