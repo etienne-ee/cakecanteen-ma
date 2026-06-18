@@ -661,9 +661,19 @@ def _send_defect_email(report: dict) -> bool:
 
 def _send_whatsapp_reply(to: str, reply_text: str, image_urls: list[str] | None = None) -> None:
     """Send a WhatsApp message via Twilio REST API."""
-    twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-    media = (image_urls or [])[:10] or None
-    twilio_client.messages.create(body=reply_text, from_=TWILIO_WHATSAPP_FROM, to=to, media_url=media)
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        print("[whatsapp] ERROR: TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN not set")
+        return
+    if not TWILIO_WHATSAPP_FROM:
+        print("[whatsapp] ERROR: TWILIO_WHATSAPP_FROM not set")
+        return
+    try:
+        twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        media = (image_urls or [])[:10] or None
+        msg = twilio_client.messages.create(body=reply_text, from_=TWILIO_WHATSAPP_FROM, to=to, media_url=media)
+        print(f"[whatsapp] sent message SID={msg.sid} to={to}")
+    except Exception as exc:
+        print(f"[whatsapp] ERROR sending message to {to}: {exc}")
 
 
 def _run_agent_and_reply(session_id: str, user_message: str, phone_number: str) -> None:
@@ -674,6 +684,8 @@ def _run_agent_and_reply(session_id: str, user_message: str, phone_number: str) 
         return
     try:
         _run_agent_and_reply_inner(session_id, user_message, phone_number)
+    except Exception as exc:
+        print(f"[whatsapp] unhandled error for {phone_number}: {exc}")
     finally:
         lock.release()
 
