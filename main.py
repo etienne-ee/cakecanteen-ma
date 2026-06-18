@@ -35,7 +35,7 @@ RESEND_FROM        = os.getenv("RESEND_FROM", "CakeCart <onboarding@resend.dev>"
 TWILIO_ACCOUNT_SID   = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN    = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
-WHATSAPP_ENABLED     = False  # Set to True and fill Twilio credentials in .env to activate
+WHATSAPP_ENABLED     = True
 
 if not ANTHROPIC_API_KEY:
     raise RuntimeError("ANTHROPIC_API_KEY is not set in .env")
