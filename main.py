@@ -785,15 +785,22 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
             else:
                 reply_text = f"{preamble}\n\n⚠️ Sorry, we couldn't submit your report right now. Please contact us directly and we'll sort this out immediately."
         else:
-            # Products block — extract images then strip the JSON for WhatsApp
+            # Products block — extract images and links, then strip the JSON for WhatsApp
             prod_match = re.search(r"```products\s*(\[.*?\])\s*```", raw_reply, re.DOTALL)
             if prod_match:
+                links = ""
                 try:
                     products = json.loads(prod_match.group(1))
                     image_urls = [p["image_url"] for p in products if p.get("image_url")]
+                    links = "\n".join(
+                        f"{p['title']}: {p['url']}"
+                        for p in products if p.get("url")
+                    )
                 except (json.JSONDecodeError, KeyError):
                     pass
                 reply_text = raw_reply[:prod_match.start()].rstrip()
+                if links:
+                    reply_text = f"{reply_text}\n\n{links}"
             else:
                 reply_text = raw_reply
 
