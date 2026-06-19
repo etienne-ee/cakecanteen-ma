@@ -25,16 +25,9 @@
         padding: 14px 26px;
       }
     }
-    #cc-chat-close {
-      display: none; position: fixed; top: 100px; right: 20px;
-      z-index: 2147483647; background: #333; color: #fff;
-      border-radius: 50%; width: 40px; height: 40px; font-size: 18px;
-      cursor: pointer; align-items: center; justify-content: center;
-      user-select: none;
-    }
-    #cc-chat-close.chat-is-open { display: flex; }
+    #cc-chat-close { display: none; }
     #ai-chat-window {
-      position: fixed; bottom: 24px; right: 24px; z-index: 99999;
+      position: fixed; bottom: 80px; right: 24px; z-index: 99999;
       width: 360px; height: 520px;
       background: #fff; border-radius: 16px;
       box-shadow: 0 8px 40px rgba(0,0,0,0.18);
@@ -49,15 +42,24 @@
     }
     #ai-chat-header {
       background: #EC008C; color: #fff;
-      padding: 14px 16px; display: flex; align-items: center;
+      padding: 14px 16px; display: flex; align-items: center; justify-content: space-between;
     }
     #ai-chat-header-info { display: flex; align-items: center; gap: 10px; }
     #ai-chat-avatar {
-      width: 36px; height: 36px;
-      background: rgba(255,255,255,0.15); border-radius: 50%;
+      width: 36px; height: 36px; border-radius: 50%; overflow: hidden;
+      background: rgba(255,255,255,0.15);
       display: flex; align-items: center; justify-content: center;
-      font-size: 12px; font-weight: 700;
+      font-size: 12px; font-weight: 700; flex-shrink: 0;
     }
+    #ai-chat-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #ai-chat-header-close {
+      background: rgba(255,255,255,0.2); border: none; color: #fff;
+      border-radius: 50%; width: 28px; height: 28px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; line-height: 1; flex-shrink: 0;
+      transition: background 0.15s;
+    }
+    #ai-chat-header-close:hover { background: rgba(255,255,255,0.35); }
     #ai-chat-title  { font-weight: 600; font-size: 14px; }
     #ai-chat-status { font-size: 11px; opacity: 0.65; margin-top: 2px; }
     #ai-chat-messages {
@@ -187,12 +189,15 @@
     <div id="ai-chat-window" aria-live="polite">
       <div id="ai-chat-header">
         <div id="ai-chat-header-info">
-          <div id="ai-chat-avatar">AI</div>
+          <div id="ai-chat-avatar">
+            <img src="${BACKEND}/static/avatar.jpg" alt="CakeCanteen" />
+          </div>
           <div>
             <div id="ai-chat-title">CakeCart Assistant</div>
             <div id="ai-chat-status">Online</div>
           </div>
         </div>
+        <button id="ai-chat-header-close" aria-label="Close chat">✕</button>
       </div>
       <div id="ai-chat-messages">
         <div class="ai-msg ai-msg--assistant">Hi there! 🍰 Welcome to CakeCanteen!
@@ -245,6 +250,7 @@ Craving something sweet? 😋 Ask me anything — I can help you find the perfec
   const sendBtn     = document.getElementById('ai-chat-send');
   const typing      = document.getElementById('ai-chat-typing');
   const suggestions = document.getElementById('ai-chat-suggestions');
+  const headerClose = document.getElementById('ai-chat-header-close');
 
   const CHIPS = [
     { label: '🎂 Find a cake',            message: "I'm looking for a cake — what do you have?" },
@@ -275,12 +281,11 @@ Craving something sweet? 😋 Ask me anything — I can help you find the perfec
     isOpen = !isOpen;
     window_.classList.toggle('open', isOpen);
     tab.classList.toggle('chat-is-open', isOpen);
-    closeBtn.classList.toggle('chat-is-open', isOpen);
     if (isOpen) { await ensureSession(); input.focus(); }
   }
 
   tab.addEventListener('click', toggleAiChat);
-  closeBtn.addEventListener('click', toggleAiChat);
+  headerClose.addEventListener('click', toggleAiChat);
 
   function appendMessage(role, text) {
     const div = document.createElement('div');
