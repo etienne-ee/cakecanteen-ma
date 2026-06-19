@@ -271,16 +271,18 @@ Whenever you list one or more products, append a JSON block at the very end of y
 ```products
 [
   {{
+    "id": 123,
     "title": "Product Name",
     "price": "R 0.00",
     "image_url": "https://...",
-    "url": "https://..."
+    "url": "https://...",
+    "stock_status": "instock"
   }}
 ]
 ```
 
 Rules:
-- Use the exact image_url and permalink from the WooCommerce product data.
+- Use the exact id, image_url, permalink, and stock_status from the WooCommerce product data.
 - Include every product you mention in the block.
 - If a product has no image, omit the image_url field.
 - Never fabricate URLs or prices.

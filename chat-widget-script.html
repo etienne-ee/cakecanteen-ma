@@ -5,23 +5,41 @@
   const style = document.createElement('style');
   style.textContent = `
     #ai-chat-root {
-      position: fixed; bottom: 24px; right: 24px; z-index: 99999;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
-    #ai-chat-toggle {
-      width: 56px; height: 56px; border-radius: 50%;
-      background: #EC008C; color: #fff; border: none; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.25);
-      transition: transform 0.2s, box-shadow 0.2s; margin-left: auto;
+    #cc-chat-tab {
+      position: fixed; left: 0; top: 50%; transform: translateY(-50%);
+      background: #B6E0F7; color: #fff; padding: 16px 10px;
+      border-radius: 0 8px 8px 0; cursor: pointer;
+      writing-mode: vertical-rl; text-orientation: mixed;
+      font-family: inherit; font-size: 14px; font-weight: 700;
+      box-shadow: 3px 0 12px rgba(0,0,0,0.15);
+      display: flex; align-items: center; gap: 6px;
+      z-index: 2147483647; user-select: none;
     }
-    #ai-chat-toggle:hover { transform: scale(1.08); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
+    #cc-chat-tab.chat-is-open { display: none; }
+    @media (max-width: 768px) {
+      #cc-chat-tab {
+        writing-mode: horizontal-tb; top: auto; bottom: 20px;
+        left: 50%; transform: translateX(-50%); border-radius: 50px;
+        padding: 14px 26px;
+      }
+    }
+    #cc-chat-close {
+      display: none; position: fixed; top: 100px; right: 20px;
+      z-index: 2147483647; background: #333; color: #fff;
+      border-radius: 50%; width: 40px; height: 40px; font-size: 18px;
+      cursor: pointer; align-items: center; justify-content: center;
+      user-select: none;
+    }
+    #cc-chat-close.chat-is-open { display: flex; }
     #ai-chat-window {
-      position: absolute; bottom: 70px; right: 0;
+      position: fixed; bottom: 24px; right: 24px; z-index: 99999;
       width: 360px; height: 520px;
       background: #fff; border-radius: 16px;
       box-shadow: 0 8px 40px rgba(0,0,0,0.18);
       display: none; flex-direction: column; overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       animation: ai-slide-up 0.2s ease;
     }
     #ai-chat-window.open { display: flex; }
@@ -118,7 +136,7 @@
     }
     .ai-product-card {
       background: #fff; border: 1.5px solid #e8e8e8; border-radius: 12px;
-      overflow: hidden; text-decoration: none; color: #111;
+      overflow: hidden; color: #111;
       transition: box-shadow 0.15s, transform 0.15s;
       display: flex; flex-direction: column;
     }
@@ -131,28 +149,41 @@
       overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
     }
     .ai-product-card__price { font-size: 12px; color: #555; margin-top: 2px; }
+    .ai-product-card__actions { margin-top: 6px; display: flex; gap: 4px; }
     .ai-product-card__cta {
-      margin-top: 6px; font-size: 11px; font-weight: 600;
-      color: #fff; background: #EC008C; border-radius: 6px; padding: 4px 8px; text-align: center;
+      flex: 1; font-size: 11px; font-weight: 600; text-align: center;
+      color: #EC008C; border: 1.5px solid #EC008C; background: #fff;
+      border-radius: 6px; padding: 4px 6px; text-decoration: none;
+      transition: background 0.15s, color 0.15s;
     }
+    .ai-product-card__cta:hover { background: #EC008C; color: #fff; }
+    .ai-product-card__atc {
+      flex: 1; font-size: 11px; font-weight: 600; text-align: center; cursor: pointer;
+      color: #fff; background: #EC008C; border: none; border-radius: 6px; padding: 4px 6px;
+      transition: background 0.15s; line-height: 1.4;
+    }
+    .ai-product-card__atc:hover:not(:disabled) { background: #C70074; }
+    .ai-product-card__atc:disabled { background: #bbb; cursor: default; }
+    .ai-product-card__atc.added { background: #16a34a; }
   `;
   document.head.appendChild(style);
 
+  // Left-side tab trigger
+  const tab = document.createElement('div');
+  tab.id = 'cc-chat-tab';
+  tab.innerHTML = '<span>🎂</span><span>Order Help</span>';
+  document.body.appendChild(tab);
+
+  // Close button (top-right when open)
+  const closeBtn = document.createElement('div');
+  closeBtn.id = 'cc-chat-close';
+  closeBtn.textContent = '✕';
+  document.body.appendChild(closeBtn);
+
+  // Chat window
   const root = document.createElement('div');
   root.id = 'ai-chat-root';
   root.innerHTML = `
-    <button id="ai-chat-toggle" aria-label="Open shopping assistant">
-      <span id="ai-chat-icon-open">
-        <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-        </svg>
-      </span>
-      <span id="ai-chat-icon-close" style="display:none">
-        <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-        </svg>
-      </span>
-    </button>
     <div id="ai-chat-window" aria-live="polite">
       <div id="ai-chat-header">
         <div id="ai-chat-header-info">
@@ -208,14 +239,11 @@ Craving something sweet? 😋 Ask me anything — I can help you find the perfec
     if (last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
   }
 
-  const toggle      = document.getElementById('ai-chat-toggle');
   const window_     = document.getElementById('ai-chat-window');
   const messages    = document.getElementById('ai-chat-messages');
   const input       = document.getElementById('ai-chat-input');
   const sendBtn     = document.getElementById('ai-chat-send');
   const typing      = document.getElementById('ai-chat-typing');
-  const iconOpen    = document.getElementById('ai-chat-icon-open');
-  const iconClose   = document.getElementById('ai-chat-icon-close');
   const suggestions = document.getElementById('ai-chat-suggestions');
 
   const CHIPS = [
@@ -243,13 +271,16 @@ Craving something sweet? 😋 Ask me anything — I can help you find the perfec
     }
   }
 
-  toggle.addEventListener('click', async () => {
+  async function toggleAiChat() {
     isOpen = !isOpen;
     window_.classList.toggle('open', isOpen);
-    iconOpen.style.display  = isOpen ? 'none' : '';
-    iconClose.style.display = isOpen ? ''     : 'none';
+    tab.classList.toggle('chat-is-open', isOpen);
+    closeBtn.classList.toggle('chat-is-open', isOpen);
     if (isOpen) { await ensureSession(); input.focus(); }
-  });
+  }
+
+  tab.addEventListener('click', toggleAiChat);
+  closeBtn.addEventListener('click', toggleAiChat);
 
   function appendMessage(role, text) {
     const div = document.createElement('div');
@@ -284,35 +315,82 @@ Craving something sweet? 😋 Ask me anything — I can help you find the perfec
     messages.scrollTop = messages.scrollHeight;
   }
 
+  async function addToCartAjax(productId, btn) {
+    if (!window.wc_add_to_cart_params) {
+      btn.textContent = 'Visit site →';
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Adding…';
+    try {
+      const ajaxUrl = window.wc_add_to_cart_params.wc_ajax_url.replace('%%endpoint%%', 'add_to_cart');
+      const body = new FormData();
+      body.append('product_id', productId);
+      body.append('quantity', 1);
+      const res = await fetch(ajaxUrl, { method: 'POST', body, credentials: 'same-origin' });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      btn.textContent = 'Added ✓';
+      btn.classList.add('added');
+      if (window.jQuery) window.jQuery(document.body).trigger('wc_fragment_refresh');
+    } catch {
+      btn.textContent = 'Failed';
+      btn.disabled = false;
+    }
+  }
+
   function appendProductCards(products) {
     if (!products || !products.length) return;
     const grid = document.createElement('div');
     grid.className = 'ai-product-grid';
     products.forEach(p => {
-      const a = document.createElement('a');
-      a.className = 'ai-product-card';
+      const card = document.createElement('div');
+      card.className = 'ai-product-card';
+
+      let productUrl = '#';
       try {
         const u = new URL(p.url);
-        if (u.protocol !== 'https:' && u.protocol !== 'http:') throw 0;
-        a.href = u.href;
-      } catch { a.href = '#'; }
-      a.target = '_blank'; a.rel = 'noopener noreferrer';
+        if (u.protocol === 'https:' || u.protocol === 'http:') productUrl = u.href;
+      } catch {}
 
+      const imgLink = document.createElement('a');
+      imgLink.href = productUrl; imgLink.target = '_blank'; imgLink.rel = 'noopener noreferrer';
       const img = document.createElement('img');
       img.className = 'ai-product-card__img loading';
       img.alt = p.title || '';
       img.onload  = () => img.classList.remove('loading');
       img.onerror = () => { img.style.display = 'none'; };
       if (p.image_url) img.src = p.image_url;
+      imgLink.appendChild(img);
 
       const info = document.createElement('div');
       info.className = 'ai-product-card__info';
       const titleEl = document.createElement('div'); titleEl.className = 'ai-product-card__title'; titleEl.textContent = p.title || '';
       const priceEl = document.createElement('div'); priceEl.className = 'ai-product-card__price'; priceEl.textContent = p.price || '';
-      const ctaEl   = document.createElement('div'); ctaEl.className   = 'ai-product-card__cta';   ctaEl.textContent = 'View product →';
-      info.append(titleEl, priceEl, ctaEl);
-      a.append(img, info);
-      grid.appendChild(a);
+
+      const actions = document.createElement('div');
+      actions.className = 'ai-product-card__actions';
+
+      const viewLink = document.createElement('a');
+      viewLink.className = 'ai-product-card__cta';
+      viewLink.href = productUrl; viewLink.target = '_blank'; viewLink.rel = 'noopener noreferrer';
+      viewLink.textContent = 'View →';
+
+      const atcBtn = document.createElement('button');
+      atcBtn.className = 'ai-product-card__atc';
+      const inStock = !p.stock_status || p.stock_status === 'instock';
+      if (inStock && p.id) {
+        atcBtn.textContent = 'Add to cart';
+        atcBtn.addEventListener('click', () => addToCartAjax(p.id, atcBtn));
+      } else {
+        atcBtn.textContent = 'Out of stock';
+        atcBtn.disabled = true;
+      }
+
+      actions.append(viewLink, atcBtn);
+      info.append(titleEl, priceEl, actions);
+      card.append(imgLink, info);
+      grid.appendChild(card);
     });
     messages.appendChild(grid);
     messages.scrollTop = messages.scrollHeight;
