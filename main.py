@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import html as _html
 import re
 import threading
 from contextlib import asynccontextmanager
@@ -181,6 +182,22 @@ def report_defect(order_number: str, customer_name: str, issue: str, contact: st
     return "Could not send report — email is not configured on the server. Advise the customer to contact the store directly."
 
 
+@wc_mcp.tool()
+def forward_query(customer_name: str, query: str, contact: str) -> str:
+    """Forward a customer query to the store team by email.
+    Call this when you cannot answer a question yourself — e.g. delivery timeframes,
+    allergens, ingredients, shelf life, store policies, or order issues you cannot resolve.
+    Requires the customer's name, a summary of their question, and a contact detail (email or phone)."""
+    sent = _send_query_email({
+        "customer_name": customer_name,
+        "query": query,
+        "contact": contact,
+    })
+    if sent:
+        return f"Query forwarded successfully. The Cake Canteen team will follow up with {contact}."
+    return "Could not send the query — email is not configured on the server. Advise the customer to contact the store directly at order@cakecanteen.co.za."
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
@@ -243,7 +260,7 @@ Your job is to help customers:
 Always be warm, conversational, and focused on finding the right product quickly.
 Store URL: {WC_STORE_URL}
 
-For questions about delivery timeframes, allergens, ingredients, shelf life, or store policies not covered by the product data, do not guess or make anything up. Acknowledge you don't have that detail and direct the customer to contact Cake Canteen directly at order@cakecanteen.co.za.
+For questions about delivery timeframes, allergens, ingredients, shelf life, or store policies not covered by the product data, do not guess or make anything up. Acknowledge you don't have that detail, then ask for the customer's name and an email address or phone number so you can forward their question to the Cake Canteen team. Once you have those details, call forward_query immediately. After the tool returns, let the customer know the team will get back to them.
 
 Do not discuss, compare, or recommend other bakeries or competitors. If a customer brings up another brand, acknowledge it briefly and redirect to what Cake Canteen offers.
 
@@ -295,7 +312,7 @@ A natural way to ask: "Sure, what's your order number and the email address you 
 
 Once you have both, call get_order. Do not guess or fabricate any order details.
 
-If the tool returns an error (order not found or email mismatch), let the customer know politely and suggest they contact Cake Canteen directly at order@cakecanteen.co.za.
+If the tool returns an error (order not found or email mismatch), let the customer know politely. Then ask for their name and a contact detail (email or phone) so you can forward the issue to the Cake Canteen team. Once you have those details along with the order number, call forward_query. After the tool returns, let the customer know the team will follow up.
 
 ## Defective or damaged orders
 
@@ -631,12 +648,13 @@ def _send_defect_email(report: dict) -> bool:
         print("[email] RESEND_API_KEY or STORE_OWNER_EMAIL not set — skipping email")
         return False
 
+    esc = _html.escape
     html = (
         f"<h2>⚠️ Defective Order Report</h2>"
-        f"<p><strong>Customer:</strong> {report.get('customer_name', 'Unknown')}</p>"
-        f"<p><strong>Order number:</strong> {report.get('order_number', 'Not provided')}</p>"
-        f"<p><strong>Issue:</strong> {report.get('issue', 'No description')}</p>"
-        f"<p><strong>Contact:</strong> {report.get('contact', 'Not provided')}</p>"
+        f"<p><strong>Customer:</strong> {esc(report.get('customer_name', 'Unknown'))}</p>"
+        f"<p><strong>Order number:</strong> {esc(report.get('order_number', 'Not provided'))}</p>"
+        f"<p><strong>Issue:</strong> {esc(report.get('issue', 'No description'))}</p>"
+        f"<p><strong>Contact:</strong> {esc(report.get('contact', 'Not provided'))}</p>"
     )
 
     try:
@@ -647,7 +665,7 @@ def _send_defect_email(report: dict) -> bool:
                 json={
                     "from": RESEND_FROM,
                     "to": [STORE_OWNER_EMAIL],
-                    "subject": f"⚠️ Defective order — #{report.get('order_number', 'unknown')}",
+                    "subject": f"⚠️ Defective order — #{esc(report.get('order_number', 'unknown'))}",
                     "html": html,
                 },
             )
@@ -656,6 +674,41 @@ def _send_defect_email(report: dict) -> bool:
         return True
     except Exception as exc:
         print(f"[email] Failed to send defect report: {exc}")
+        return False
+
+
+def _send_query_email(query: dict) -> bool:
+    """Send a customer query notification to the store owner via Resend REST API.
+    Returns True on success, False on any failure."""
+    if not RESEND_API_KEY or not STORE_OWNER_EMAIL:
+        print("[email] RESEND_API_KEY or STORE_OWNER_EMAIL not set — skipping email")
+        return False
+
+    esc = _html.escape
+    html = (
+        f"<h2>💬 Customer Query</h2>"
+        f"<p><strong>Customer:</strong> {esc(query.get('customer_name', 'Unknown'))}</p>"
+        f"<p><strong>Question:</strong> {esc(query.get('query', 'No details'))}</p>"
+        f"<p><strong>Contact:</strong> {esc(query.get('contact', 'Not provided'))}</p>"
+    )
+
+    try:
+        with httpx.Client(timeout=15) as http:
+            resp = http.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                json={
+                    "from": RESEND_FROM,
+                    "to": [STORE_OWNER_EMAIL],
+                    "subject": f"💬 Customer query from {esc(query.get('customer_name', 'a customer'))}",
+                    "html": html,
+                },
+            )
+            resp.raise_for_status()
+        print(f"[email] Customer query forwarded from {query.get('customer_name')}")
+        return True
+    except Exception as exc:
+        print(f"[email] Failed to forward customer query: {exc}")
         return False
 
 
