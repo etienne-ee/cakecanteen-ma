@@ -110,7 +110,10 @@ def search_products(query: str, category_id: int = 0, per_page: int = 10) -> str
             "price": f"R {float(p.get('price') or 0):.2f}",
             "url": p.get("permalink", ""),
             "image_url": p["images"][0]["src"] if p.get("images") else None,
-            "category": p["categories"][0]["name"] if p.get("categories") else "Uncategorized",
+            "categories": [c["name"] for c in p.get("categories", [])] or ["Uncategorized"],
+            "cape_town_only": any(
+                c["name"] in ("Cape Town Only", "CPT Only") for c in p.get("categories", [])
+            ),
             "stock_status": p.get("stock_status", "instock"),
         }
         for p in products[:per_page]
@@ -260,11 +263,50 @@ Your job is to help customers:
 Always be warm, conversational, and focused on finding the right product quickly.
 Store URL: {WC_STORE_URL}
 
-For questions about delivery timeframes, allergens, ingredients, shelf life, or store policies not covered by the product data, do not guess or make anything up. Acknowledge you don't have that detail and let the customer know they can reach the team directly at order@cakecanteen.co.za, or you can forward the question on their behalf. If they'd like you to forward it, ask for their name and an email address or phone number, then call forward_query immediately. After the tool returns, let the customer know the team will get back to them.
+For questions about delivery, collection, packaging, cake storage, or trading hours, answer from the Delivery & collection reference section below — do not guess beyond what it says. For questions it does not cover — allergens, ingredients, shelf life, custom orders, or other store policies — do not guess or make anything up. Acknowledge you don't have that detail and let the customer know they can reach the team directly at order@cakecanteen.co.za, or you can forward the question on their behalf. If they'd like you to forward it, ask for their name and an email address or phone number, then call forward_query immediately. After the tool returns, let the customer know the team will get back to them.
 
 Do not discuss, compare, or recommend other bakeries or competitors. If a customer brings up another brand, acknowledge it briefly and redirect to what Cake Canteen offers.
 
 {categories_section}
+## Delivery & collection reference
+
+Answer questions about delivery, collection, packaging, cake storage, and trading hours using ONLY the information below. Do not guess beyond it.
+
+### Nationwide delivery
+Cake Canteen delivers nationwide Monday to Wednesday. To avoid courier warehouse backlogs over the weekend, no courier orders are sent outside the Western Cape on Thursdays or Fridays. Orders ship approximately one day after the selected dispatch date.
+Delivery timeframes: Express Shipping approximately 1-2 business days after dispatch; Economy Shipping approximately 3-5 business days after dispatch.
+Courier partners: Courier Guy, My Courier, Bobgo, Mr. Delivery, Uber, Wumdrop.
+For weekend events: place the order by the preceding Monday to allow enough time.
+Re-delivery: if no one is available to receive the order, a re-delivery fee equal to the original delivery fee applies.
+Packaging: orders are wrapped in insulated packaging with ice packs to keep them fresh in all conditions. Cakes ship chilled.
+
+### Cape Town-only items
+Some products cannot be couriered nationwide and are only available for Cape Town delivery or collection — these have "Cape Town Only" or "CPT Only" in their categories and cape_town_only set to true in the search results (for example the Butter Pastry Quiches and other fresh items). Before telling a customer an item can be delivered nationwide, check its cape_town_only flag. If a customer outside the Western Cape asks for a Cape Town-only item, let them know it's collection/Cape Town delivery only and suggest similar items that do ship nationwide.
+
+### Receiving and storing a cake
+If a cake arrives within 2 days of the expected delivery date, it is safe to enjoy.
+Storage: place immediately in the freezer (keeps up to 3 months), or keep in the original wrapping in the refrigerator (up to 1 week).
+Unboxing: for best results keep the cake in the fridge overnight before unboxing; if needed sooner, chill in freezer or fridge for a minimum of 2 hours so the frosting stabilises. Then: remove the plastic wrap, gently peel away the acetate layer, place on a plate.
+
+### Cake Canteen collection points
+All Cake Canteen locations are inside Hertex Fabrics showrooms unless noted. Collection is ready from 13:30 until close of business.
+- Bellville: 12 Bella Rosa, Bellville, Cape Town, 7550. Mon-Fri 08:00-17:00, Sat 08:00-14:00.
+- Gardens: 187 Upper Buitenkant Street, Cape Town, 8001. Mon-Fri 08:00-17:00, Sat 08:00-14:00.
+- Stellenbosch: Unit 6B, The Woodmill, Vredenburg Rd, Devonvallei, 7660. Mon-Fri 07:00-17:00, Sat 09:00-13:00.
+- Paarl: Alleman Square Business Park, Southern Paarl. Mon-Fri 08:00-16:30, Sat 08:00-14:00.
+
+### CAB Foods collection points
+CAB Foods locations accept Cake Canteen collections. Hours: Mon-Fri 08:30-17:00, Sat 08:30-14:00, Public Holidays 08:30-13:00.
+- Brackenfell: C/O Frans Conradie & Kenwill Drive, Okavango Park, Brackenfell.
+- Kenilworth: Shop 126, Kenilworth Centre, Doncaster Road.
+- Somerset West: The Pines, Centenary Drive, Somerset West.
+
+### Other collection points
+- Engen Hillside, Durbanville: Cnr The Hills St & Durbanville Ave, Durbanville, Cape Town, 7550. Collection Mon-Sat 13:00-16:00 only (the Engen itself is open 24/7, but collection is 13:00-16:00).
+
+### Retail store trading hours
+Monday to Friday 08:00-17:00, Saturday 09:00-14:00. These apply to Cake Canteen retail stores; collection point hours are listed per location above.
+
 ## Search strategy
 
 Always call search_products with per_page set to 10 or less — never exceed 25.
@@ -340,25 +382,62 @@ async def lifespan(app: FastAPI):
         saved_agent_id = os.getenv("AGENT_ID")
         saved_env_id   = os.getenv("ENVIRONMENT_ID")
 
-        if saved_agent_id and saved_env_id:
+        # Environment: reuse if the saved ID resolves, otherwise create one.
+        if saved_env_id:
             try:
-                client.beta.agents.retrieve(saved_agent_id)
                 client.beta.environments.retrieve(saved_env_id)
-                agent_id       = saved_agent_id
                 environment_id = saved_env_id
-                print(f"♻️  Reusing agent:       {agent_id}")
                 print(f"♻️  Reusing environment: {environment_id}")
-            except Exception:
-                print("⚠️  Saved IDs are stale — creating new agent and environment...")
-                saved_agent_id = saved_env_id = None
+            except anthropic.NotFoundError:
+                print("⚠️  Saved ENVIRONMENT_ID is stale — creating a new environment...")
+                saved_env_id = None
+        if not saved_env_id:
+            env = client.beta.environments.create(
+                name="cakecart-agent-env",
+                config={
+                    "type": "cloud",
+                    "networking": {"type": "unrestricted"},
+                },
+            )
+            environment_id = env.id
+            set_key(ENV_FILE, "ENVIRONMENT_ID", environment_id)
+            print(f"✅ Environment created: {environment_id}")
 
-        if not saved_agent_id or not saved_env_id:
-            print("🚀 Starting up — creating Claude Managed Agent...")
+        # Agent: reuse if the saved ID resolves to a live agent; archived or
+        # missing agents are recreated. Anything other than a genuine
+        # not-found raises and fails startup loudly rather than silently
+        # forking resources.
+        agent = None
+        if saved_agent_id:
+            try:
+                agent = client.beta.agents.retrieve(saved_agent_id)
+                if getattr(agent, "archived_at", None):
+                    print("⚠️  Saved agent is archived — creating a new agent...")
+                    agent = None
+            except anthropic.NotFoundError:
+                print("⚠️  Saved AGENT_ID is stale — creating a new agent...")
 
-            categories = _fetch_wc_categories()
-            print(f"📂 Loaded {len(categories)} product categories")
-            system_prompt = _build_system_prompt(categories)
+        categories = _fetch_wc_categories()
+        print(f"📂 Loaded {len(categories)} product categories")
+        system_prompt = _build_system_prompt(categories)
 
+        if agent is not None:
+            agent_id = agent.id
+            print(f"♻️  Reusing agent: {agent_id}")
+            # Publish prompt changes as a new version of the same agent. New
+            # sessions always resolve to the latest version; running sessions
+            # keep the version they started on.
+            if agent.system != system_prompt:
+                updated = client.beta.agents.update(
+                    agent_id,
+                    version=agent.version,
+                    system=system_prompt,
+                )
+                print(f"🔄 Prompt changed — agent updated to version {updated.version}")
+            else:
+                print("♻️  Prompt unchanged — reusing current agent version")
+        else:
+            print("🚀 Creating Claude Managed Agent...")
             agent = client.beta.agents.create(
                 name="CakeCart Shopping Assistant",
                 model={"id": "claude-sonnet-4-6"},
@@ -379,21 +458,8 @@ async def lifespan(app: FastAPI):
                 ],
             )
             agent_id = agent.id
-            print(f"✅ Agent created: {agent_id}")
-
-            env = client.beta.environments.create(
-                name="cakecart-agent-env",
-                config={
-                    "type": "cloud",
-                    "networking": {"type": "unrestricted"},
-                },
-            )
-            environment_id = env.id
-            print(f"✅ Environment created: {environment_id}")
-
             set_key(ENV_FILE, "AGENT_ID", agent_id)
-            set_key(ENV_FILE, "ENVIRONMENT_ID", environment_id)
-            print("💾 IDs saved to .env")
+            print(f"✅ Agent created: {agent_id}")
 
         print(f"🛒 Connected to WooCommerce store: {WC_STORE_URL}")
         print("🟢 Ready — server is running\n")
@@ -588,7 +654,10 @@ def _search_wc_products(query: str, per_page: int = 10) -> list[dict]:
                 "price": f"R {float(p.get('price') or 0):.2f}",
                 "permalink": p.get("permalink", ""),
                 "image_url": p["images"][0]["src"] if p.get("images") else None,
-                "category": p["categories"][0]["name"] if p.get("categories") else "Uncategorized",
+                "categories": [c["name"] for c in p.get("categories", [])] or ["Uncategorized"],
+                "cape_town_only": any(
+                    c["name"] in ("Cape Town Only", "CPT Only") for c in p.get("categories", [])
+                ),
                 "stock_status": p.get("stock_status", "instock"),
             }
             for p in products

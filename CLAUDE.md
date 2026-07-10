@@ -1,6 +1,6 @@
 # CakeCart AI Agent
 
-Shopping assistant for [CakeCart](https://cakecartcopy.electricegg.site/) built on Claude Managed Agents.
+Shopping assistant for [CakeCart](https://cakecanteen.co.za/ ) built on Claude Managed Agents.
 
 ## Stack
 
@@ -8,14 +8,14 @@ Shopping assistant for [CakeCart](https://cakecartcopy.electricegg.site/) built 
 - **AI:** Claude Managed Agents (`claude-sonnet-4-6`)
 - **E-commerce:** WooCommerce REST API — custom `search_products` tool (no native MCP)
 - **Email alerts:** Resend
-- **WhatsApp:** Twilio (code present but inactive — see below)
+- **WhatsApp:** Twilio (active — `WHATSAPP_ENABLED = True` in `main.py`, see below)
 
 ## Store details
 
 | Field | Value |
 |-------|-------|
 | Store name | CakeCart |
-| Store URL | https://cakecartcopy.electricegg.site/ |
+| Store URL | https://cakecanteen.co.za/ |
 | Platform | WooCommerce |
 
 ## Running locally
@@ -31,21 +31,23 @@ First run creates the Claude Managed Agent and prints `AGENT_ID` and `ENVIRONMEN
 
 ## Critical notes
 
-- **Clear `AGENT_ID` and `ENVIRONMENT_ID` in `.env` whenever you change the system prompt.**
-  The agent is created once and cached — it will not pick up prompt changes unless you delete those two values and let the server recreate the agent on next start.
+- **Prompt changes publish automatically — never clear `AGENT_ID` or `ENVIRONMENT_ID`.**
+  On every startup the server rebuilds the system prompt and, if it differs from the live agent's, calls `agents.update()` to publish it as a new version of the same agent (the ID never changes). New sessions always use the latest version; running sessions keep theirs. On Railway this means deploy = publish: the restart after a push publishes the new prompt.
+
+- **On Railway, `AGENT_ID` and `ENVIRONMENT_ID` must live in the service's environment variables.** The container filesystem is ephemeral — the `.env` values saved on first run are lost on redeploy, and without them the server would create a duplicate agent.
 
 - **Hard-refresh the browser** after restarting the server. The frontend caches the session ID, which becomes invalid after a restart.
 
 - **If using ngrok or a tunnel:** the public URL changes each session. Update your chat widget embed or any webhook URLs accordingly.
 
-## WhatsApp (Twilio) — currently inactive
+## WhatsApp (Twilio) — active
 
-The full WhatsApp/Twilio implementation is in `main.py` but gated behind `WHATSAPP_ENABLED = False` (line ~37). To activate:
+The WhatsApp/Twilio implementation in `main.py` is enabled (`WHATSAPP_ENABLED = True`, line ~39). It requires:
 
-1. Fill in `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_WHATSAPP_FROM` in `.env`
-2. Set `WHATSAPP_ENABLED = True` in `main.py`
-3. Point your Twilio webhook to `https://<your-server>/whatsapp`
-4. Restart the server
+1. `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, and `TWILIO_WHATSAPP_FROM` in `.env`
+2. The Twilio webhook pointed to `https://<your-server>/whatsapp`
+
+To deactivate, set `WHATSAPP_ENABLED = False` in `main.py` and restart.
 
 ## WooCommerce product search
 
