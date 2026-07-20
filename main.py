@@ -123,7 +123,8 @@ def search_products(query: str, category_id: int = 0, per_page: int = 10) -> str
 @wc_mcp.tool()
 def get_order(order_number: str, email: str) -> str:
     """Look up a WooCommerce order by order number and verify ownership by email.
-    Returns order status, date placed, line items, delivery address, and total.
+    Returns order status, date placed, line items, delivery address, total, and
+    fulfilment details (pickup date/time/location or delivery date).
     Always ask the customer for both their order number and the email they ordered with before calling this tool."""
     try:
         order_id = int(order_number.lstrip("#").strip())
@@ -147,6 +148,17 @@ def get_order(order_number: str, email: str) -> str:
     if order.get("billing", {}).get("email", "").lower() != email.strip().lower():
         return json.dumps({"error": "The email address does not match this order. Please check and try again."})
 
+    meta = {m["key"]: m["value"] for m in order.get("meta_data", []) if isinstance(m, dict)}
+    fulfilment: dict = {"type": meta.get("delivery_type") or "unknown"}
+    if fulfilment["type"] == "pickup":
+        fulfilment.update({
+            "pickup_date": meta.get("pickup_date", ""),
+            "pickup_time": meta.get("pickup_time", ""),
+            "pickup_location": meta.get("pickup_location", ""),
+        })
+    elif fulfilment["type"] == "delivery":
+        fulfilment["delivery_date"] = meta.get("delivery_date", "")
+
     return json.dumps({
         "order_number": order.get("number"),
         "status": order.get("status"),
@@ -165,6 +177,7 @@ def get_order(order_number: str, email: str) -> str:
             "city": order.get("shipping", {}).get("city", ""),
             "postcode": order.get("shipping", {}).get("postcode", ""),
         },
+        "fulfilment": fulfilment,
     })
 
 
@@ -311,17 +324,26 @@ Monday to Friday 08:00-17:00, Saturday 09:00-14:00. These apply to Cake Canteen 
 
 Always call search_products with per_page set to 10 or less — never exceed 25.
 
-When a customer asks for a specific type or flavour of product, use the matching category_id
-from the list above — this is more accurate than a keyword search alone.
+Make ONE search call per customer request, then answer from its results.
+- If the customer names a type or flavour with a matching category, use that
+  category_id (one call).
+- Otherwise use one keyword query with the customer's own words.
+Do not fire multiple speculative searches with different guessed category IDs
+in parallel — one well-chosen call is enough.
 Examples:
 - "Do you have chocolate cake?" → search_products(category_id=<chocolate category id>)
 - "Show me birthday cakes" → search_products(category_id=<birthday category id>)
 - "Any vegan options?" → search_products(category_id=<vegan category id>)
 
-If no category clearly matches, fall back to a keyword query:
-1. Search with the customer's specific keywords first.
-2. If that returns 0 products, try a broader term.
-3. Never tell a customer something doesn't exist based on a single failed search — try at least two searches first.
+Only search again if the first call returns 0 products: broaden the term or
+drop the category filter and retry ONCE. That is a HARD LIMIT of 2 search
+calls per customer request — never call search_products a 3rd time for the
+same request, no matter how the first two calls turned out. Never tell a
+customer something doesn't exist based on a single failed search — always use
+both of your two calls before concluding nothing matches.
+
+If both calls return nothing, say so honestly and offer to forward the
+question to the team. Do not keep searching.
 
 ## Product cards
 
@@ -354,19 +376,59 @@ A natural way to ask: "Sure, what's your order number and the email address you 
 
 Once you have both, call get_order. Do not guess or fabricate any order details.
 
+The order data includes a fulfilment section. Use it to answer date questions:
+- For pickup orders: give the pickup date, time slot, and location directly.
+- For delivery orders: delivery_date is the customer's selected delivery/dispatch
+  date. Orders ship approximately one day after the selected dispatch date, then
+  Express Shipping takes ~1-2 business days and Economy ~3-5 (see the Delivery &
+  collection reference). Share the selected date and this timeframe — never
+  promise an exact courier arrival day for courier deliveries.
+- If the fulfilment fields are empty or the type is unknown, say the exact date
+  isn't visible to you and offer to forward the question to the team.
+
 If the tool returns an error (order not found or email mismatch), let the customer know politely. Give them the option to contact the team directly at order@cakecanteen.co.za, or offer to forward the issue on their behalf. If they'd like you to forward it, ask for their name and a contact detail (email or phone), then call forward_query with those details and the order number. After the tool returns, let the customer know the team will follow up.
 
 ## Defective or damaged orders
 
 If a customer reports receiving a defective, damaged, or wrong item:
 1. Apologise sincerely and empathetically.
-2. Ask for their order number, a brief description of the problem, and a contact detail (email or phone) — if they haven't already provided them.
+2. In that same message, ask for whichever of these three you still need:
+   order number, a brief description of the problem, a contact detail (email
+   or phone).
 3. Once you have all three, call the report_defect tool immediately.
-4. After the tool returns, tell the customer the report has been submitted and the store team will follow up with them.
+4. After the tool returns, tell the customer the report has been submitted and
+   the store team will follow up with them.
+
+Never lose a complaint — hard limit of 2 asks, then escalate with what you have:
+Count your own messages in this conversation that asked the customer for the
+order number or issue description — this includes your very first reply in
+step 2 above. You may do this AT MOST TWICE TOTAL. If you are about to send a
+third message asking for the order number and/or issue description again, STOP
+— do not send it. Instead, as long as you have at least one contact detail
+(email or phone) from the customer, call forward_query immediately with the
+customer's name (or "Not provided"), that contact detail, and a query noting
+this is a damaged/defective order report, listing every detail the customer did
+share and which details (order number and/or description) are still missing.
+Then tell the customer their complaint has been passed to the team, who will
+contact them directly to collect the remaining details. Use report_defect only
+when you have all three details; use forward_query for these partial reports.
+If you don't have a contact detail yet, that is the one thing you must keep
+asking for — but still never ask for the order number/description a third time.
+
+Worked example (this exact pattern lost a real complaint in production):
+- Customer: "My order arrived damaged." → You apologise and ask for order
+  number, description, and contact detail. (1st ask.)
+- Customer replies with something unclear, or with only some of that. → You
+  ask again, once, for whatever is still missing. (2nd ask — this is your
+  last one.)
+- Customer replies again, still without an order number or description, but
+  now you have a contact detail (e.g. a phone number). → Do NOT ask a third
+  time. Call forward_query right now with that contact detail and a note that
+  the order number and description are missing. Tell the customer the team
+  has been notified and will follow up to get the rest.
 
 Rules:
 - Use whatever contact detail the customer has shared (email, phone — whatever is available).
-- Only call report_defect once you have the order number, issue description, and a contact detail.
 - Do not tell the customer the report was submitted before the tool has returned successfully.
 """
 
