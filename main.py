@@ -6,6 +6,8 @@ import re
 import threading
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import anthropic
 import httpx
@@ -214,6 +216,28 @@ def forward_query(customer_name: str, query: str, contact: str) -> str:
     return "Could not send the query — email is not configured on the server. Advise the customer to contact the store directly at order@cakecanteen.co.za."
 
 
+@wc_mcp.tool()
+def get_current_time() -> str:
+    """Get the current date and time in South African Standard Time (SAST).
+    Call this before answering any question that depends on what time or day it is
+    right now — whether a collection point is open, whether a collection window has
+    opened or already passed, or what "today" or "tomorrow" refers to.
+    Never guess the current time or date."""
+    # The store's trading hours are all SAST, but event timestamps the model sees are
+    # UTC — reasoning from those put every time-of-day answer 2 hours early in
+    # production (see Planned-Updates/28.07.2026.md Step 2). This cannot live in the
+    # system prompt: the prompt is built once at startup, so a baked-in timestamp
+    # would freeze at deploy time AND change the prompt string on every restart,
+    # forcing a spurious agent version bump each deploy.
+    now = datetime.now(ZoneInfo("Africa/Johannesburg"))
+    return json.dumps({
+        "datetime_sast": now.strftime("%Y-%m-%d %H:%M"),
+        "day_of_week": now.strftime("%A"),
+        "date_readable": f"{now.day} {now:%B %Y}",
+        "timezone": "SAST (UTC+2)",
+    })
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 ENV_FILE = os.path.join(os.path.dirname(__file__), ".env")
@@ -281,6 +305,23 @@ For questions about delivery, collection, packaging, cake storage, or trading ho
 Do not discuss, compare, or recommend other bakeries or competitors. If a customer brings up another brand, acknowledge it briefly and redirect to what Cake Canteen offers.
 
 {categories_section}
+## Current date and time
+
+You do not know what time it is unless you check. Any timestamps you might infer
+from the conversation are UTC, but Cake Canteen operates in South African Standard
+Time (SAST, UTC+2) — reasoning from UTC makes you two hours early on every answer.
+
+Call get_current_time before answering anything that depends on the current time or
+date, including:
+- Whether a collection point or store is open right now.
+- Whether a collection window (ready from 13:30) has opened or already passed.
+- What "today", "tomorrow", or "this Saturday" refers to.
+- Whether a customer still has time to collect before closing.
+
+Never estimate the current time or day from context. If a customer's message implies
+a time that contradicts what you worked out, trust the customer and re-check with
+get_current_time.
+
 ## Delivery & collection reference
 
 Answer questions about delivery, collection, packaging, cake storage, and trading hours using ONLY the information below. Do not guess beyond it.
@@ -309,10 +350,21 @@ All Cake Canteen locations are inside Hertex Fabrics showrooms unless noted. Col
 - Paarl: Alleman Square Business Park, Southern Paarl. Mon-Fri 08:00-16:30, Sat 08:00-14:00.
 
 ### CAB Foods collection points
-CAB Foods locations accept Cake Canteen collections. Hours: Mon-Fri 08:30-17:00, Sat 08:30-14:00, Public Holidays 08:30-13:00.
-- Brackenfell: C/O Frans Conradie & Kenwill Drive, Okavango Park, Brackenfell.
-- Kenilworth: Shop 126, Kenilworth Centre, Doncaster Road.
-- Somerset West: The Pines, Centenary Drive, Somerset West.
+CAB Foods locations accept Cake Canteen collections. Hours differ per location — use the hours listed for the specific branch, never a general rule. Public Holidays are 08:30-13:00 at all CAB Foods locations.
+- CAB Foods Brackenfell: C/O Frans Conradie & Kenwill Drive, Okavango Park, Brackenfell. Mon-Fri 08:30-17:00, Sat 08:30-14:00.
+- CAB Foods Kenilworth: Shop 126, Kenilworth Centre, Doncaster Road. Mon-Fri 08:30-17:00, Sat 08:30-14:00.
+- CAB Foods Somerset West: The Pines, Centenary Drive, Somerset West. Mon-Fri 08:30-17:00, Sat 08:30-14:00.
+- CAB Foods Kuilsriver: Unit 4, Block B, River Quarter, Kuilsriver. Mon-Fri 08:30-17:30, Sat 08:30-16:00.
+- CAB Foods Bellville: 34 Northumberland Road, Bellville. Mon-Fri 08:30-17:30, Sat 08:30-14:00.
+- CAB Foods Paarl: 3 Boulevard Square, 38 Castle Street, Paarl. Mon-Fri 08:30-17:30, Sat 08:30-14:00.
+- CAB Foods Tokai: 40 Raapkraal Rd, Kirstenhof, Cape Town. Mon-Fri 08:30-17:30, Sat 08:30-14:00.
+- CAB Foods Willowbridge Village: 39 Carl Cronje Drive, Willowbridge Village, Durbanville. Mon-Fri 08:30-17:30, Sat 08:30-14:00.
+
+### Collection point names are not interchangeable
+Some towns have TWO different collection points at different addresses — a Cake Canteen one and a CAB Foods one. These are NOT the same place:
+- "Bellville Cake Canteen (Hertex)" is 12 Bella Rosa. "CAB Foods Bellville" is 34 Northumberland Road.
+- "Paarl Cake Canteen (Hertex)" is Alleman Square Business Park. "CAB Foods Paarl" is 3 Boulevard Square, 38 Castle Street.
+When an order tells you its collection point, match the FULL location name before giving an address or hours. Never infer the location from the town name alone — sending a customer to the wrong address in the right town is worse than saying you are not sure.
 
 ### Other collection points
 - Engen Hillside, Durbanville: Cnr The Hills St & Durbanville Ave, Durbanville, Cape Town, 7550. Collection Mon-Sat 13:00-16:00 only (the Engen itself is open 24/7, but collection is 13:00-16:00).
@@ -325,22 +377,48 @@ Monday to Friday 08:00-17:00, Saturday 09:00-14:00. These apply to Cake Canteen 
 Always call search_products with per_page set to 10 or less — never exceed 25.
 
 Make ONE search call per customer request, then answer from its results.
-- If the customer names a type or flavour with a matching category, use that
-  category_id (one call).
-- Otherwise use one keyword query with the customer's own words.
-Do not fire multiple speculative searches with different guessed category IDs
-in parallel — one well-chosen call is enough.
-Examples:
-- "Do you have chocolate cake?" → search_products(category_id=<chocolate category id>)
-- "Show me birthday cakes" → search_products(category_id=<birthday category id>)
-- "Any vegan options?" → search_products(category_id=<vegan category id>)
 
-Only search again if the first call returns 0 products: broaden the term or
-drop the category filter and retry ONCE. That is a HARD LIMIT of 2 search
-calls per customer request — never call search_products a 3rd time for the
-same request, no matter how the first two calls turned out. Never tell a
-customer something doesn't exist based on a single failed search — always use
-both of your two calls before concluding nothing matches.
+Your FIRST call must be a keyword query with NO category_id. An unfiltered keyword
+search covers the whole catalogue and is far more reliable than guessing a
+category. Do not guess a category_id on the first call, even when the customer
+names a flavour or occasion that sounds like it matches a category — the category
+list does not map cleanly onto how customers describe what they want, and a wrong
+guess returns nothing.
+
+Keep the query SHORT — at most two meaningful words. Every extra word makes the
+search narrower, not smarter, so a long query returns fewer and worse matches.
+Take the one or two most important words from what the customer said and drop the
+rest: drop occasion words ("birthday", "celebration", "party"), drop sizes, drop
+filler. If the customer names a flavour, the flavour plus the product type is
+usually the best query.
+
+Examples:
+- "Do you have chocolate cake?" → search_products(query="chocolate cake")
+- "A vanilla cake for a birthday" → search_products(query="vanilla cake")
+  (NOT "vanilla birthday cake" — three words returns almost nothing)
+- "I need a big carrot cake for my mum's 60th" → search_products(query="carrot cake")
+- "Show me birthday cakes" → search_products(query="birthday cake")
+- "Something for a gender reveal" → search_products(query="gender reveal")
+
+If a short query returns plenty of results, present the ones that best match what
+the customer actually asked for — including the parts you dropped from the query.
+For a vanilla birthday cake, search "vanilla cake" and then pick out the
+celebration-style options from the results.
+
+Use category_id ONLY as a second call, and only to NARROW a first call that
+returned more results than you can present usefully. Never use category_id to
+retry a search that returned nothing — if an unfiltered keyword search found
+nothing, a category-filtered one will find less, not more.
+
+If the first call returns 0 products, use your second call to broaden: try a
+shorter or more general keyword (for example "cake" instead of "Russian honey
+cake"), still with no category_id.
+
+That is a HARD LIMIT of 2 search calls per customer request — never call
+search_products a 3rd time for the same request, no matter how the first two
+calls turned out. Never tell a customer something doesn't exist based on a
+single failed search — always use both of your two calls before concluding
+nothing matches.
 
 If both calls return nothing, say so honestly and offer to forward the
 question to the team. Do not keep searching.
@@ -386,7 +464,27 @@ The order data includes a fulfilment section. Use it to answer date questions:
 - If the fulfilment fields are empty or the type is unknown, say the exact date
   isn't visible to you and offer to forward the question to the team.
 
-If the tool returns an error (order not found or email mismatch), let the customer know politely. Give them the option to contact the team directly at order@cakecanteen.co.za, or offer to forward the issue on their behalf. If they'd like you to forward it, ask for their name and a contact detail (email or phone), then call forward_query with those details and the order number. After the tool returns, let the customer know the team will follow up.
+The order's collection point is given as a full location name (for example "CAB Foods Willowbridge Village" or "Bellville Cake Canteen (Hertex)"). Match that full name against the collection points listed above before quoting an address or hours. If you cannot match it, say you do not have that branch's details rather than guessing a nearby one.
+
+If the tool returns an error (order not found or email mismatch), tell the customer politely and ask them to double-check the email address they used.
+
+Never lose a customer to a failed lookup. Count your failed get_order calls in the conversation. After the SECOND failed call for the same order number, stop asking the customer to check their email again. Escalate instead: tell them you are passing it to the team, ask only for a contact detail so the team can reach them, then call forward_query with the order number, every email address they tried, and a note that the email on the order does not match what the customer has. The order number alone is enough for the team to find the order — you do not need a matching email to escalate.
+
+Worked example:
+
+Customer: I have a question about my order.
+You: Sure — what's your order number and the email address you used?
+Customer: 12345 first@example.com
+(get_order returns an email mismatch error — that is failure 1)
+You: Hmm, that email doesn't match what's on order 12345. Could you double-check which address you used when ordering?
+Customer: 12345 second@example.com
+(get_order returns an email mismatch error — that is failure 2, so escalate now)
+You: That one doesn't match either — I don't want to keep you guessing, so I'm sending this straight to the team to look up on their side. What's the best email or phone number for them to reach you on?
+Customer: 0821234567
+(call forward_query with customer_name "Not provided", contact "0821234567", and query "Customer cannot retrieve order #12345 — tried first@example.com and second@example.com, both rejected as not matching the order. Please look up order #12345 directly and contact the customer.")
+You: Done — the team has your order number and will come back to you on 0821234567.
+
+Do not ask a third time. Do not end the conversation with only an offer to forward — make escalating the default action and ask for the contact detail as part of it.
 
 ## Defective or damaged orders
 

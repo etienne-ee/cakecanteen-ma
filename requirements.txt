@@ -8,3 +8,4 @@ python-multipart==0.0.29
 twilio==9.10.9
 uvicorn[standard]>=0.35.0
 woocommerce==3.0.0
+tzdata
