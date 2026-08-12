@@ -160,10 +160,14 @@ def get_order(order_number: str, email: str) -> str:
         })
     elif fulfilment["type"] == "delivery":
         fulfilment["delivery_date"] = meta.get("delivery_date", "")
-        # Normalised to the option name only. The WooCommerce method title carries
-        # its own day counts ("Economy Shipping (2-3 Business Days)") which differ
-        # from the timeframes in the system prompt's delivery reference — passing
-        # the raw title through would give the model two competing numbers.
+        # shipping_option is the normalised name; shipping_label is the full
+        # checkout label ("Economy Shipping (2-3 Business Days)"). The label's
+        # day counts are AUTHORITATIVE: Economy differs by shipping zone
+        # (Western Cape 2-3, rest of South Africa 3-5), so the label on the
+        # order is the zone-correct timeframe this customer actually saw and
+        # agreed to at checkout. An earlier version stripped it to avoid
+        # "competing numbers" — that was backwards; the prompt's flat figure
+        # was the wrong one (see Planned-Updates/06.08.2026.md Change 0).
         lines = order.get("shipping_lines") or []
         title = (lines[0].get("method_title") or "") if lines else ""
         if "express" in title.lower():
@@ -172,6 +176,8 @@ def get_order(order_number: str, email: str) -> str:
             fulfilment["shipping_option"] = "Economy"
         elif title:
             fulfilment["shipping_option"] = title
+        if title:
+            fulfilment["shipping_label"] = title
 
     return json.dumps({
         "order_number": order.get("number"),
@@ -282,7 +288,72 @@ def _fetch_wc_categories() -> list[dict]:
         return []
 
 
-def _build_system_prompt(categories: list[dict]) -> str:
+# Snapshot of the live shipping zones, verified 2026-08-12. Used ONLY when the
+# startup fetch fails: unlike categories (which degrade gracefully by omission),
+# omitting the shipping section would leave the prompt instructing the agent to
+# use a list that isn't there, and no Economy timeframe at all. Rendered through
+# the same formatter as fetched data so an unchanged store produces an identical
+# prompt either way (no spurious agent version bump on a flaky startup).
+SHIPPING_METHODS_FALLBACK: list[tuple[str, list[str]]] = [
+    ("Western Cape", ["Express Shipping (1-2 Business Days)",
+                      "Economy Shipping (2-3 Business Days)"]),
+    ("South Africa", ["Express Shipping (1-2 Business Days)",
+                      "Economy Shipping (3-5 Business Days)"]),
+]
+
+
+def _fetch_shipping_methods() -> list[tuple[str, list[str]]]:
+    """
+    Fetch the enabled courier methods per shipping zone at startup.
+
+    Economy's timeframe is zone-dependent (Western Cape vs the rest of South
+    Africa), so the prompt must carry the store's own per-zone labels rather
+    than a hardcoded figure — hardcoding is what put a wrong flat number in
+    front of every customer between 08-03 and 08-12. Collection/pickup methods
+    are excluded: they aren't delivery timeframes.
+    """
+    try:
+        auth_params = {"consumer_key": WC_CONSUMER_KEY, "consumer_secret": WC_CONSUMER_SECRET}
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; CakeCartBot/1.0)"}
+        out: list[tuple[str, list[str]]] = []
+        with httpx.Client(timeout=10, headers=headers) as http:
+            resp = http.get(
+                f"{WC_STORE_URL.rstrip('/')}/wp-json/wc/v3/shipping/zones",
+                params=auth_params,
+            )
+            resp.raise_for_status()
+            for zone in resp.json():
+                mresp = http.get(
+                    f"{WC_STORE_URL.rstrip('/')}/wp-json/wc/v3/shipping/zones/{zone['id']}/methods",
+                    params=auth_params,
+                )
+                mresp.raise_for_status()
+                titles = [
+                    m["title"] for m in mresp.json()
+                    if m.get("enabled") and m.get("method_id") not in ("local_pickup",)
+                ]
+                if titles:
+                    out.append((zone.get("name", f"Zone {zone['id']}"), titles))
+        if not out:
+            raise ValueError("no zones with enabled courier methods")
+        return out
+    except Exception as exc:
+        print(f"⚠️  Could not fetch shipping zones, using fallback snapshot: {exc}")
+        return SHIPPING_METHODS_FALLBACK
+
+
+def _build_system_prompt(
+    categories: list[dict],
+    shipping_methods: list[tuple[str, list[str]]] | None = None,
+) -> str:
+    # One line per zone, e.g.
+    #   - Western Cape: Express Shipping (1-2 Business Days); Economy Shipping (2-3 Business Days)
+    # These labels are the store's own checkout wording — quoted verbatim so the
+    # agent's timeframes can never drift from what the customer sees at checkout.
+    shipping_lines = "\n".join(
+        f"  - {zone}: " + "; ".join(titles)
+        for zone, titles in (shipping_methods or SHIPPING_METHODS_FALLBACK)
+    )
     cat_lines = "\n".join(
         f'  - {c["name"]} (category_id: {c["id"]}, {c["count"]} products)'
         for c in categories
@@ -368,7 +439,9 @@ Answer questions about delivery, collection, packaging, cake storage, and tradin
 
 ### Nationwide delivery
 Cake Canteen delivers nationwide Monday to Wednesday. To avoid courier warehouse backlogs over the weekend, no courier orders are sent outside the Western Cape on Thursdays or Fridays.
-The date a customer selects at checkout is their DISPATCH date, not their delivery date. It is the date from which the order starts being prepared and shipped. Delivery takes place after the dispatch date, according to the shipping option selected: Express 1-2 business days; Economy 2-4 business days.
+The date a customer selects at checkout is their DISPATCH date, not their delivery date. It is the date from which the order starts being prepared and shipped. Delivery takes place after the dispatch date, according to the shipping option selected and the delivery area:
+{shipping_lines}
+Express is 1-2 business days from dispatch anywhere in South Africa. Economy depends on where the order is going — it is faster within the Western Cape than to the rest of the country — so never quote a single Economy figure. Use the timeframes listed in the shipping options above, and if you do not know where the customer is, ask before giving an Economy estimate.
 Never call a dispatch date a "delivery date" when speaking to a customer, and never give a dispatch date without the shipping timeframe alongside it.
 Courier partners: Courier Guy, My Courier, Bobgo, Mr. Delivery, Uber, Wumdrop.
 For weekend events: place the order by the preceding Monday to allow enough time.
@@ -500,18 +573,24 @@ The order data includes a fulfilment section. Use it to answer date questions:
 - For delivery orders: the delivery_date field is the customer's selected
   DISPATCH date. Despite its name it is NOT the day the order arrives. Call it
   the dispatch date when you speak to the customer, never the delivery date,
-  and always give the shipping timeframe with it: delivery follows the dispatch
-  date according to the shipping option, Express 1-2 business days and Economy
-  2-4 business days.
+  and always give the shipping timeframe with it: delivery follows the
+  dispatch date according to the shipping option on the order.
   Never promise an exact courier arrival day.
 
-  The fulfilment section also gives shipping_option ("Express" or "Economy")
-  when the order has one. Use it to quote only the timeframe that actually
-  applies to this customer — do not list both options and do not ask the
-  customer which one they chose, as the order already tells you. Only if
-  shipping_option is missing should you give both timeframes and say which
-  applies depends on the shipping option chosen. Take the day counts from the
-  Delivery & collection reference above, not from any label on the order.
+  The fulfilment section gives shipping_option ("Express" or "Economy") and
+  shipping_label, the full option the customer chose at checkout including its
+  timeframe (for example "Economy Shipping (2-3 Business Days)"). Quote the
+  timeframe from shipping_label — it is what this customer actually selected
+  and agreed to, and it is correct for their delivery area. Do not substitute
+  a figure from anywhere else, do not list both options, and do not ask the
+  customer which option they chose, as the order already tells you. Only if
+  both fields are missing should you give the per-area timeframes from the
+  Delivery & collection reference above and say which applies depends on the
+  shipping option chosen.
+
+  Right: "Your order is set for dispatch on 6 August on Economy Shipping,
+  which is 2-3 business days from dispatch."
+  Wrong: "Economy is 2-4 business days." (there is no single Economy figure)
 
   If a customer asks whether their order will arrive on a particular day, a
   dispatch date falling on that day is NOT a yes. Give the dispatch date and
@@ -616,6 +695,45 @@ Please check the courier status and reassure the customer.")
 If instead they had said "no thanks, I'll give it another day", you would
 leave it there and forward nothing.
 
+If the conversation context tells you the customer's contact number (for
+example a WhatsApp session, which carries the number they are messaging
+from), you already have what you need to escalate. Do NOT ask them for a
+contact detail — anywhere in the conversation, in any of the flows above or
+below — call forward_query straight away using that number, and tell them the
+team will be in touch on it. Asking a customer for a number you already have
+is the single most common reason an escalation never happens: they have
+already had a bad experience and often just stop replying.
+
+This applies whenever the customer asks to be contacted, asks for a phone
+number or an email address, or asks to speak to a person — not only when you
+have decided to escalate. A request to be contacted is itself the trigger:
+use the number you already hold and forward it.
+
+Never state the number back to the customer or mention how you know it. Never
+treat a number given to you as context as an order identifier.
+
+Cake Canteen has no public telephone number, so you cannot give one out. Say
+so plainly — do not imply one exists, and do not stall. But never stop there:
+a customer asking to phone someone needs a person, so in the same message
+offer to pass their details to the team so they can be contacted.
+
+If you already have their number from the conversation context (a WhatsApp
+session), do not ask for it — forward it straight away and tell them the team
+will be in touch on it. Only ask for a contact detail if you genuinely don't
+have one.
+
+Right, WhatsApp: "There's no phone number for the store, but I've passed your
+details to the team and they'll come back to you on this number."
+Right, website: "There's no phone number for the store, but I can pass your
+details to the team so they can contact you — what's the best number or email
+for them?"
+Wrong: "I'm sorry, I don't have a telephone number available. The best way to
+reach the team is via email." (True, and a dead end — it puts the work back
+on a customer who has usually already tried.)
+
+If they have already emailed the store, do not tell them to email again. That
+is the point at which they need a person, so escalate.
+
 ## Defective or damaged orders
 
 If a customer reports receiving a defective, damaged, or wrong item:
@@ -709,7 +827,9 @@ async def lifespan(app: FastAPI):
 
         categories = _fetch_wc_categories()
         print(f"📂 Loaded {len(categories)} product categories")
-        system_prompt = _build_system_prompt(categories)
+        shipping_methods = _fetch_shipping_methods()
+        print(f"🚚 Loaded shipping methods for {len(shipping_methods)} zones")
+        system_prompt = _build_system_prompt(categories, shipping_methods)
 
         if agent is not None:
             agent_id = agent.id
@@ -1272,9 +1392,22 @@ async def whatsapp_webhook(
             agent=agent_id,
             environment_id=environment_id,
             title=f"WhatsApp session {phone_number}",
+            # For transcript pulls and reporting; the model is NOT assumed to
+            # see metadata — the context prefix below is what informs it.
+            metadata={"channel": "whatsapp"},
         )
         session_id = session.id
         whatsapp_sessions[phone_number] = session_id
+        # Tell the agent what channel it is on and the number it is already
+        # talking to, so escalation never has to ask for a contact detail the
+        # server holds (Planned-Updates/06.08.2026.md Change 1 — the 08-04
+        # dead-end was a customer who never answered exactly that question).
+        # First message of the session only: session context persists.
+        contact_number = phone_number.removeprefix("whatsapp:")
+        user_message = (
+            f"[Channel: WhatsApp. This customer's contact number is {contact_number}.]"
+            f"\n\n{user_message}"
+        )
 
     background_tasks.add_task(
         lambda: executor.submit(_run_agent_and_reply, session_id, user_message, phone_number)
