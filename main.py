@@ -3,6 +3,7 @@ import json
 import asyncio
 import html as _html
 import re
+import secrets
 import threading
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +15,7 @@ import httpx
 from dotenv import load_dotenv, set_key
 from fastapi import FastAPI, HTTPException, Form, Request, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastmcp import FastMCP
 from twilio.twiml.messaging_response import MessagingResponse
@@ -40,10 +41,23 @@ TWILIO_AUTH_TOKEN    = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_FROM = os.getenv("TWILIO_WHATSAPP_FROM")
 WHATSAPP_ENABLED     = True
 
+# /mcp auth — see ISSUES_LOG.md #2. MCP_SHARED_SECRET is a comma-separated list
+# so a rotation can add the new secret before removing the old one, instead of
+# requiring Railway and the vault credential to change in the same instant.
+MCP_SHARED_SECRETS = [s for s in os.getenv("MCP_SHARED_SECRET", "").split(",") if s]
+MCP_VAULT_ID       = os.getenv("MCP_VAULT_ID")
+MCP_AUTH_MODE      = os.getenv("MCP_AUTH_MODE")
+
 if not ANTHROPIC_API_KEY:
     raise RuntimeError("ANTHROPIC_API_KEY is not set in .env")
 if not WC_STORE_URL:
     raise RuntimeError("WC_STORE_URL is not set in .env")
+if not MCP_SHARED_SECRETS:
+    raise RuntimeError("MCP_SHARED_SECRET is not set in .env")
+if not MCP_VAULT_ID:
+    raise RuntimeError("MCP_VAULT_ID is not set in .env — run scripts/setup_mcp_vault.py first")
+if MCP_AUTH_MODE not in ("observe", "enforce"):
+    raise RuntimeError('MCP_AUTH_MODE must be set to "observe" or "enforce" in .env')
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 executor = ThreadPoolExecutor(max_workers=20)
@@ -814,6 +828,54 @@ Rules:
 # Create MCP HTTP app once so its lifespan can be wired into FastAPI's lifespan
 mcp_http_app = wc_mcp.http_app(path="/")
 
+
+class RequireBearer:
+    """
+    ASGI wrapper gating the /mcp mount only — deliberately not `add_middleware`
+    (app-wide) or `Depends` (mounted sub-apps bypass parent dependencies).
+    See ISSUES_LOG.md #2: /mcp was public with no auth at all.
+
+    MCP_AUTH_MODE=observe logs whether a valid token was present but always
+    passes the request through — used during rollout so a vault/credential
+    mismatch shows up in logs instead of 401ing real customer traffic and
+    risking the agent confabulating a false success (see Planned-Updates).
+    MCP_AUTH_MODE=enforce actually rejects unauthenticated requests.
+    """
+
+    def __init__(self, app, tokens: list[str], mode: str):
+        self.app = app
+        self.tokens = tokens
+        self.mode = mode
+
+    def _is_valid(self, scope) -> bool:
+        headers = dict(scope["headers"])
+        auth = headers.get(b"authorization", b"").decode()
+        if not auth.startswith("Bearer "):
+            return False
+        presented = auth[len("Bearer "):]
+        return any(secrets.compare_digest(presented, token) for token in self.tokens)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        valid = self._is_valid(scope)
+
+        if self.mode == "observe":
+            if not valid:
+                print("⚠️  /mcp: request without a valid bearer token (observe mode — allowed through)")
+            await self.app(scope, receive, send)
+            return
+
+        # enforce
+        if not valid:
+            response = JSONResponse({"error": "unauthorized"}, status_code=401)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
 # ── Lifespan: create agent + environment once on startup ──────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -923,7 +985,7 @@ app.add_middleware(
 )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/mcp", mcp_http_app)
+app.mount("/mcp", RequireBearer(mcp_http_app, MCP_SHARED_SECRETS, MCP_AUTH_MODE))
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -957,6 +1019,7 @@ def create_session():
         agent=agent_id,
         environment_id=environment_id,
         title="CakeCart chat session",
+        vault_ids=[MCP_VAULT_ID],
     )
     return {"session_id": session.id}
 
@@ -1428,6 +1491,7 @@ async def whatsapp_webhook(
             # For transcript pulls and reporting; the model is NOT assumed to
             # see metadata — the context prefix below is what informs it.
             metadata={"channel": "whatsapp"},
+            vault_ids=[MCP_VAULT_ID],
         )
         session_id = session.id
         whatsapp_sessions[phone_number] = session_id
