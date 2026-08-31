@@ -506,6 +506,25 @@ Always call search_products with per_page set to 10 or less — never exceed 25.
 
 Make ONE search call per customer request, then answer from its results.
 
+A customer message can name more than one distinct item in one turn — that is
+several requests bundled together, not one. The 2-call limit below is per
+ITEM, not per message: search each distinct item separately (one call each,
+unless a given item's own search needs the second broaden/narrow call), then
+answer covering everything found. A compound message naming several items
+does not count against the cap just for naming several things — but retrying
+the SAME item's search a 3rd time is still forbidden, no matter how many other
+items are in the same message.
+
+Example — "Kids birthday, rainbow, a double bento, SpongeBob" names THREE
+items (rainbow, bento, SpongeBob), not one request repeated three ways:
+- search_products(query="rainbow cake") → found, present it
+- search_products(query="bento cake") → found, present it
+- search_products(query="SpongeBob") → nothing found, say so and offer to forward
+Three calls, three different items, each searched once — this is correct, not
+a cap violation. Contrast with asking about ONE item ("a SpongeBob cake"): that
+still gets at most 2 calls total (first keyword search, second only to
+broaden/narrow that same item), never a 3rd.
+
 Your FIRST call must be a keyword query with NO category_id. An unfiltered keyword
 search covers the whole catalogue and is far more reliable than guessing a
 category. Do not guess a category_id on the first call, even when the customer
@@ -542,10 +561,10 @@ If the first call returns 0 products, use your second call to broaden: try a
 shorter or more general keyword (for example "cake" instead of "Russian honey
 cake"), still with no category_id.
 
-That is a HARD LIMIT of 2 search calls per customer request — never call
-search_products a 3rd time for the same request, no matter how the first two
+That is a HARD LIMIT of 2 search calls per distinct item — never call
+search_products a 3rd time for the same item, no matter how the first two
 calls turned out. Never tell a customer something doesn't exist based on a
-single failed search — always use both of your two calls before concluding
+single failed search — always use both of your two calls for that item before concluding
 nothing matches.
 
 If both calls return nothing, say so honestly and offer to forward the
@@ -1044,6 +1063,8 @@ async def chat(session_id: str, body: ChatRequest):
     async def event_stream():
         loop = asyncio.get_event_loop()
         queue: asyncio.Queue = asyncio.Queue()
+        tool_failed = False
+        tool_failure_type: str | None = None
 
         def _run_stream():
             try:
@@ -1081,7 +1102,17 @@ async def chat(session_id: str, body: ChatRequest):
 
             event = item
 
+            if event.type == "session.error":
+                err = getattr(event, "error", None)
+                err_type = getattr(err, "type", "") if err else ""
+                if str(err_type).startswith("mcp_"):
+                    tool_failed = True
+                    tool_failure_type = err_type
+                continue
+
             if event.type == "agent.message":
+                if tool_failed:
+                    continue  # a tool call failed this turn — don't forward whatever the model says next
                 for block in event.content:
                     text = getattr(block, "text", None)
                     if not text:
@@ -1122,6 +1153,17 @@ async def chat(session_id: str, body: ChatRequest):
                 yield f"data: {json.dumps({'type': 'tool', 'name': event.name})}\n\n"
 
             elif event.type == "session.status_idle":
+                if tool_failed:
+                    executor.submit(
+                        _send_tool_failure_alert,
+                        f"webchat session {session_id}",
+                        tool_failure_type or "unknown",
+                    )
+                    fallback_message = (
+                        "We're having trouble reaching our systems right now — "
+                        "please try again in a moment, or contact the team directly."
+                    )
+                    yield f"data: {json.dumps({'type': 'error', 'message': fallback_message})}\n\n"
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 break
 
@@ -1287,6 +1329,42 @@ def _send_query_email(query: dict) -> bool:
         return False
 
 
+def _send_tool_failure_alert(context: str, error_type: str) -> bool:
+    """Alert the store owner that a customer-facing tool call failed — the
+    agent may otherwise confabulate a result instead of surfacing this.
+    Returns True on success, False on any failure."""
+    if not RESEND_API_KEY or not STORE_OWNER_EMAIL:
+        print("[email] RESEND_API_KEY or STORE_OWNER_EMAIL not set — skipping email")
+        return False
+
+    esc = _html.escape
+    html = (
+        f"<h2>🔧 Tool call failed</h2>"
+        f"<p><strong>Error type:</strong> {esc(error_type)}</p>"
+        f"<p><strong>Context:</strong> {esc(context)}</p>"
+        f"<p>A customer may have received a fallback message instead of a real answer.</p>"
+    )
+
+    try:
+        with httpx.Client(timeout=15) as http:
+            resp = http.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                json={
+                    "from": RESEND_FROM,
+                    "to": [STORE_OWNER_EMAIL],
+                    "subject": f"🔧 Cake Canteen agent: tool failure ({esc(error_type)})",
+                    "html": html,
+                },
+            )
+            resp.raise_for_status()
+        print(f"[email] Tool failure alert sent: {error_type}")
+        return True
+    except Exception as exc:
+        print(f"[email] Failed to send tool failure alert: {exc}")
+        return False
+
+
 # ── WhatsApp (Twilio) — set WHATSAPP_ENABLED = True in this file to activate ──
 
 def _send_whatsapp_reply(to: str, reply_text: str, image_urls: list[str] | None = None) -> None:
@@ -1323,6 +1401,8 @@ def _run_agent_and_reply(session_id: str, user_message: str, phone_number: str) 
 def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number: str) -> None:
     last_text = ""
     rate_limited = False
+    tool_failed = False
+    tool_failure_type: str | None = None
     try:
         with client.beta.sessions.events.stream(session_id) as stream:
             client.beta.sessions.events.send(
@@ -1360,14 +1440,20 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
                             }],
                         )
                 elif event.type == "agent.message":
+                    if tool_failed:
+                        continue  # a tool call failed this turn — don't keep the model's fabricated text
                     for block in event.content:
                         text = getattr(block, "text", None)
                         if text:
                             last_text = text  # overwrite — only the final reply matters
                 elif event.type == "session.error":
                     err = getattr(event, "error", None)
-                    if err and getattr(err, "type", None) == "model_rate_limited_error":
+                    err_type = getattr(err, "type", None) if err else None
+                    if err_type == "model_rate_limited_error":
                         rate_limited = True
+                    elif err_type and str(err_type).startswith("mcp_"):
+                        tool_failed = True
+                        tool_failure_type = err_type
                 elif event.type == "session.status_idle":
                     stop = getattr(event, "stop_reason", None)
                     if stop and getattr(stop, "type", None) == "retries_exhausted":
@@ -1378,10 +1464,14 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
         _send_whatsapp_reply(phone_number, "Sorry, something went wrong. Please try again.")
         return
 
-    if rate_limited or not last_text:
+    if rate_limited or tool_failed or not last_text:
+        if tool_failed:
+            executor.submit(_send_tool_failure_alert, f"WhatsApp {phone_number}", tool_failure_type or "unknown")
         _send_whatsapp_reply(
             phone_number,
-            "I'm a bit busy right now — please send your message again in a moment.",
+            "I'm having trouble reaching our systems right now — please try again shortly, or the team can help you directly."
+            if tool_failed
+            else "I'm a bit busy right now — please send your message again in a moment.",
         )
         return
 
@@ -1477,7 +1567,7 @@ async def whatsapp_webhook(
         if request.headers.get("X-Forwarded-Proto") == "https" and url.startswith("http://"):
             url = "https://" + url[7:]
         if not validator.validate(url, form_data, signature):
-            pass  # TODO: enforce once Twilio credentials are active
+            raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
     phone_number = From
     user_message = Body.strip()
