@@ -896,13 +896,53 @@ class RequireBearer:
 
 
 # ── Lifespan: create agent + environment once on startup ──────────────────────
+def _require_configured_id(name: str) -> str | None:
+    """Read a saved Managed Agents resource ID, distinguishing "not configured
+    yet" from "configured but blank".
+
+    Absent key  -> None, and the caller creates the resource. A genuine
+                   first-ever deploy for this service.
+    Blank value -> RuntimeError. Something cleared it, and creating would put a
+                   brand-new agent onto live traffic.
+
+    This exists because of 2026-07-20: Railway's AGENT_ID Service Variable held
+    an empty string, `if saved_agent_id:` below treated it as falsy, and startup
+    took the same silent path as a first-ever deploy -- forking
+    agent_01W6MHfh6VAXHwWToRJ94yqZ onto live traffic and orphaning the running
+    agent_01Wmbmsu2idKxukFvLgxBGqt mid-conversation. ISSUES_LOG.md logged a
+    startup safeguard as an open follow-up that was never implemented; this is it.
+
+    It compounds: the new ID is written only to the container's ephemeral .env,
+    so a blank Railway variable forks again on every restart. That is how ~19
+    duplicate agents and ~35 duplicate environments accumulated in the workspace.
+
+    A stale ID and an archived agent both log a warning today. A blank one logged
+    "Creating...", indistinguishable from a legitimate first run. This removes
+    that asymmetry -- which is what made the 07-20 fork invisible until
+    sessions.list() was checked by hand.
+    """
+    if name not in os.environ:
+        return None
+    value = os.environ[name].strip()
+    if not value:
+        raise RuntimeError(
+            f"{name} is present but empty -- refusing to start.\n"
+            f"An empty value would CREATE a new agent/environment and put it on "
+            f"live traffic (this happened on 2026-07-20).\n"
+            f"Either set {name} to the real ID in Railway's Service Variables, or "
+            f"remove the variable entirely if this is genuinely a first-ever "
+            f"deploy for this service."
+        )
+    return value
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with mcp_http_app.lifespan(app):
         global agent_id, environment_id
 
-        saved_agent_id = os.getenv("AGENT_ID")
-        saved_env_id   = os.getenv("ENVIRONMENT_ID")
+        saved_agent_id = _require_configured_id("AGENT_ID")
+        saved_env_id   = _require_configured_id("ENVIRONMENT_ID")
 
         # Environment: reuse if the saved ID resolves, otherwise create one.
         if saved_env_id:
@@ -1557,17 +1597,32 @@ async def whatsapp_webhook(
 
     form_data = dict(await request.form())
 
+    # Authenticate BEFORE acting on the request's shape.
+    #
+    # Fail CLOSED. This used to be `if TWILIO_AUTH_TOKEN:`, so an unset or blank
+    # token skipped validation entirely and this public webhook accepted
+    # anything -- on the channel carrying ~31% of customer turns. An
+    # unauthenticated request could mint a real (billable) session and send a
+    # WhatsApp message as Cake Canteen to an attacker-chosen number. Enforcement
+    # on a *present* token was fixed 2026-08-31 (commit 53be219); this closes
+    # the remaining hole in the same route. ibeef-ma/main.py already did this.
+    if not TWILIO_AUTH_TOKEN:
+        raise HTTPException(503, "WhatsApp signature validation is not configured")
+
+    validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    signature = request.headers.get("X-Twilio-Signature", "")
+    url = str(request.url)
+    if request.headers.get("X-Forwarded-Proto") == "https" and url.startswith("http://"):
+        url = "https://" + url[7:]
+    if not validator.validate(url, form_data, signature):
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+
+    # Moved BELOW validation: this early return previously ran first, so a
+    # forged request with no Body was answered 204 without its signature ever
+    # being checked. Genuine Twilio status callbacks still get their 204 -- just
+    # after they have been authenticated rather than before.
     if not From or Body is None:
         return Response(status_code=204)
-
-    if TWILIO_AUTH_TOKEN:
-        validator = RequestValidator(TWILIO_AUTH_TOKEN)
-        signature = request.headers.get("X-Twilio-Signature", "")
-        url = str(request.url)
-        if request.headers.get("X-Forwarded-Proto") == "https" and url.startswith("http://"):
-            url = "https://" + url[7:]
-        if not validator.validate(url, form_data, signature):
-            raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
     phone_number = From
     user_message = Body.strip()
