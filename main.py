@@ -1298,6 +1298,42 @@ def _create_wc_order(order_data: dict) -> dict:
         return resp.json()
 
 
+def _escalation_email_html(emoji: str, title: str, rows: list[tuple[str, str]], note: str = "") -> str:
+    """Shared CakeCart-branded shell for escalation emails. Inline CSS only -- Outlook
+    strips <style> blocks and external stylesheets, so every rule has to live on the
+    tag itself to render consistently across mail clients."""
+    esc = _html.escape
+    row_html = "".join(
+        f'<tr>'
+        f'<td style="padding:10px 0;border-bottom:1px solid #f0f0f0;color:#767676;'
+        f'font-size:13px;width:130px;vertical-align:top;">{esc(label)}</td>'
+        f'<td style="padding:10px 0;border-bottom:1px solid #f0f0f0;color:#222222;'
+        f'font-size:14px;vertical-align:top;">{esc(value)}</td>'
+        f'</tr>'
+        for label, value in rows
+    )
+    note_html = (
+        f'<p style="margin:14px 0 0;color:#767676;font-size:13px;">{esc(note)}</p>'
+        if note else ""
+    )
+    return (
+        '<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;'
+        'background:#ffffff;border:1px solid #e5e5e5;border-radius:8px;overflow:hidden;">'
+        f'<div style="background:#B6E0F7;padding:20px 24px;">'
+        f'<h1 style="margin:0;color:#212934;font-size:18px;font-weight:700;">{emoji} {esc(title)}</h1>'
+        '</div>'
+        '<div style="padding:8px 24px 24px;">'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+        f'style="border-collapse:collapse;">{row_html}</table>'
+        f'{note_html}'
+        '</div>'
+        '<div style="background:#fafafa;padding:12px 24px;border-top:1px solid #f0f0f0;">'
+        '<p style="margin:0;color:#999999;font-size:11px;">Sent automatically by CakeCart\'s AI shopping assistant</p>'
+        '</div>'
+        '</div>'
+    )
+
+
 def _send_defect_email(report: dict) -> bool:
     """Send a defective order notification to the store owner via Resend REST API.
     Returns True on success, False on any failure."""
@@ -1306,13 +1342,12 @@ def _send_defect_email(report: dict) -> bool:
         return False
 
     esc = _html.escape
-    html = (
-        f"<h2>⚠️ Defective Order Report</h2>"
-        f"<p><strong>Customer:</strong> {esc(report.get('customer_name', 'Unknown'))}</p>"
-        f"<p><strong>Order number:</strong> {esc(report.get('order_number', 'Not provided'))}</p>"
-        f"<p><strong>Issue:</strong> {esc(report.get('issue', 'No description'))}</p>"
-        f"<p><strong>Contact:</strong> {esc(report.get('contact', 'Not provided'))}</p>"
-    )
+    html = _escalation_email_html("⚠️", "Defective Order Report", [
+        ("Customer", report.get("customer_name", "Unknown")),
+        ("Order number", report.get("order_number", "Not provided")),
+        ("Issue", report.get("issue", "No description")),
+        ("Contact", report.get("contact", "Not provided")),
+    ])
 
     try:
         with httpx.Client(timeout=15) as http:
@@ -1342,12 +1377,11 @@ def _send_query_email(query: dict) -> bool:
         return False
 
     esc = _html.escape
-    html = (
-        f"<h2>💬 Customer Query</h2>"
-        f"<p><strong>Customer:</strong> {esc(query.get('customer_name', 'Unknown'))}</p>"
-        f"<p><strong>Question:</strong> {esc(query.get('query', 'No details'))}</p>"
-        f"<p><strong>Contact:</strong> {esc(query.get('contact', 'Not provided'))}</p>"
-    )
+    html = _escalation_email_html("💬", "Customer Query", [
+        ("Customer", query.get("customer_name", "Unknown")),
+        ("Question", query.get("query", "No details")),
+        ("Contact", query.get("contact", "Not provided")),
+    ])
 
     try:
         with httpx.Client(timeout=15) as http:
@@ -1378,12 +1412,10 @@ def _send_tool_failure_alert(context: str, error_type: str) -> bool:
         return False
 
     esc = _html.escape
-    html = (
-        f"<h2>🔧 Tool call failed</h2>"
-        f"<p><strong>Error type:</strong> {esc(error_type)}</p>"
-        f"<p><strong>Context:</strong> {esc(context)}</p>"
-        f"<p>A customer may have received a fallback message instead of a real answer.</p>"
-    )
+    html = _escalation_email_html("🔧", "Tool call failed", [
+        ("Error type", error_type),
+        ("Context", context),
+    ], note="A customer may have received a fallback message instead of a real answer.")
 
     try:
         with httpx.Client(timeout=15) as http:
