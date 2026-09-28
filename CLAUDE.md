@@ -36,6 +36,8 @@ First run creates the Claude Managed Agent and prints `AGENT_ID` and `ENVIRONMEN
 
 - **On Railway, `AGENT_ID` and `ENVIRONMENT_ID` must live in the service's environment variables.** The container filesystem is ephemeral — the `.env` values saved on first run are lost on redeploy, and without them the server would create a duplicate agent.
 
+- **Set `EMAIL_DRY_RUN=1` in local `.env` before any test run.** `forward_query`, `report_defect` and tool-failure alerts otherwise send a real email on every call. With it on they are logged instead. Never set it on Railway.
+
 - **Hard-refresh the browser** after restarting the server. The frontend caches the session ID, which becomes invalid after a restart.
 
 - **If using ngrok or a tunnel:** the public URL changes each session. Update your chat widget embed or any webhook URLs accordingly.

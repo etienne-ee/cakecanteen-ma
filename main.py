@@ -35,6 +35,12 @@ ALLOWED_ORIGINS    = os.getenv("ALLOWED_ORIGINS", "*").split(",")
 STORE_OWNER_EMAIL  = os.getenv("STORE_OWNER_EMAIL")
 RESEND_API_KEY     = os.getenv("RESEND_API_KEY")
 RESEND_FROM        = os.getenv("RESEND_FROM", "CakeCart <onboarding@resend.dev>")
+# Tool-failure alerts are EE's infrastructure problem, not the store's — send
+# them to EE when ALERT_EMAIL is set, the store owner only as a fallback.
+ALERT_EMAIL        = os.getenv("ALERT_EMAIL") or STORE_OWNER_EMAIL
+# Local testing only: log emails instead of sending them. Every forward_query,
+# report_defect and tool alert otherwise lands in a real inbox. Never set on Railway.
+EMAIL_DRY_RUN      = os.getenv("EMAIL_DRY_RUN", "").lower() in ("1", "true", "yes")
 
 TWILIO_ACCOUNT_SID   = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN    = os.getenv("TWILIO_AUTH_TOKEN")
@@ -81,11 +87,21 @@ def _get_whatsapp_lock(phone_number: str) -> threading.Lock:
 wc_mcp = FastMCP("WooCommerce MCP")
 
 
+def _clean_order_number(order_number) -> str | None:
+    """Normalise an order number the model may send as 51655, "51655" or "#51655"."""
+    if order_number is None:
+        return None
+    cleaned = str(order_number).lstrip("#").strip()
+    return cleaned or None
+
+
 @wc_mcp.tool()
-def search_products(query: str, category_id: int = 0, per_page: int = 10) -> str:
+def search_products(query: str, category_id: int = 0, per_page: int = 10,
+                    min_price: float = 0, max_price: float = 0) -> str:
     """Search for published products in the CakeCart WooCommerce store.
     Pass category_id to filter by product category (preferred for type/flavour queries).
     Pass query for keyword search within a category or across all products.
+    Pass max_price (and/or min_price), in rand, when the customer gives a budget.
     Returns product IDs, names, prices, images, stock status, and permalinks."""
     per_page = min(per_page, 25)
 
@@ -99,6 +115,10 @@ def search_products(query: str, category_id: int = 0, per_page: int = 10) -> str
         params["search"] = query
     if category_id:
         params["category"] = str(category_id)
+    if min_price:
+        params["min_price"] = str(min_price)
+    if max_price:
+        params["max_price"] = str(max_price)
 
     with httpx.Client(timeout=10) as http:
         resp = http.get(
@@ -233,15 +253,18 @@ def report_defect(order_number: str, customer_name: str, issue: str, contact: st
 
 
 @wc_mcp.tool()
-def forward_query(customer_name: str, query: str, contact: str) -> str:
+def forward_query(customer_name: str, query: str, contact: str,
+                  order_number: str | int | None = None) -> str:
     """Forward a customer query to the store team by email.
     Call this when you cannot answer a question yourself — e.g. delivery timeframes,
     allergens, ingredients, shelf life, store policies, or order issues you cannot resolve.
-    Requires the customer's name, a summary of their question, and a contact detail (email or phone)."""
+    Requires the customer's name, a summary of their question, and a contact detail (email or phone).
+    Include order_number if the query is about a specific order and you have it."""
     sent = _send_query_email({
         "customer_name": customer_name,
         "query": query,
         "contact": contact,
+        "order_number": _clean_order_number(order_number),
     })
     if sent:
         return f"Query forwarded successfully. The Cake Canteen team will follow up with {contact}."
@@ -532,6 +555,25 @@ names a flavour or occasion that sounds like it matches a category — the categ
 list does not map cleanly onto how customers describe what they want, and a wrong
 guess returns nothing.
 
+The one exception is a BUDGET. When the customer gives a price limit ("under
+R500", "500 and below", "nothing over R300"), set max_price to that amount
+(and min_price if they give a floor), and choose the rest of the call like
+this:
+- They named an occasion or type that appears BY NAME in the category list
+  (Birthday, Kids, Cupcakes…) → use that category_id with max_price and NO
+  query. A keyword like "birthday" only matches products with that word in
+  their name, so it hides most of the category.
+- They named a flavour ("chocolate under R400") → the short flavour keyword
+  with max_price, no category_id.
+- Neither → max_price alone, no query and no category_id.
+Then leave out anything in the results that isn't what they asked for (for
+example merchandise when they want a cake).
+
+Example — the customer has said it's for a birthday, then "500r and below":
+search_products(category_id=<Birthday's ID from the category list>,
+max_price=500, per_page=10) — NOT search_products(query="birthday cake",
+max_price=500), which returned one cake when four were in stock.
+
 Keep the query SHORT — at most two meaningful words. Every extra word makes the
 search narrower, not smarter, so a long query returns fewer and worse matches.
 Take the one or two most important words from what the customer said and drop the
@@ -569,6 +611,11 @@ nothing matches.
 
 If both calls return nothing, say so honestly and offer to forward the
 question to the team. Do not keep searching.
+
+Never tell a customer something is "the only" option or that there is
+nothing else, unless the search you ran had no keyword and returned fewer
+results than you asked for. Otherwise present what you found as options and
+offer to look further.
 
 ## Product cards
 
@@ -637,6 +684,8 @@ The order data includes a fulfilment section. Use it to answer date questions:
   isn't visible to you and offer to forward the question to the team.
 
 The order's collection point is given as a full location name (for example "CAB Foods Willowbridge Village" or "Bellville Cake Canteen (Hertex)"). Match that full name against the collection points listed above before quoting an address or hours. If you cannot match it, say you do not have that branch's details rather than guessing a nearby one.
+
+If you have already looked up an order successfully earlier in this conversation and the customer comes back about the same order, do not ask for the order number or email again. Reuse them, and call get_order again with the same details if you need fresh status.
 
 If the tool returns an error (order not found or email mismatch), tell the customer politely and ask them to double-check the email address they used.
 
@@ -768,37 +817,64 @@ If they have already emailed the store, do not tell them to email again. That
 is the point at which they need a person, so escalate.
 
 Once you have called forward_query for a particular issue in this
-conversation, that issue has been forwarded — do not call forward_query
-again for it, no matter how many more times the customer mentions it. A
-second or third email does not get the team there any faster; the first one
-already has what they need to act. This applies in every escalation flow in
-this prompt, not only order lookups.
+conversation, that issue has been forwarded. Do not forward it again just
+because the customer mentions it again — only for the follow-ups listed
+below. This applies in every escalation flow in this prompt, not only order
+lookups. When you decide not to forward again, do not explain your reasons
+to the customer (never say another email "won't get there any faster");
+just reassure them and give them another way to reach the team.
 
-If the customer follows up on something you have already forwarded —
-"no one has contacted me", "any update?", or simply repeating the same
-complaint — reassure them it has already been passed to the team and they
-will be in touch. Do not forward it again.
+Call forward_query again for something you have already forwarded only when
+the customer's follow-up gives the team something they did not have. Start
+that query with "FOLLOW-UP:" and say only what has changed. A follow-up
+counts when the customer:
+- raises a genuinely different problem, or gives an instruction that
+  changes what the team needs to do (first asking for same-day delivery,
+  then separately asking you to cancel if that's not possible);
+- gives a detail the team didn't have when you forwarded — the name the
+  order is under, an order number, an address, a different contact detail;
+- tells you things have got materially worse since you forwarded — the
+  order is now past its expected delivery window, or the event it is for
+  is now today or tomorrow;
+- says nobody has contacted them yet about the thing you forwarded. You may
+  send ONE follow-up for this per issue. If they say it again after that,
+  it is not new.
 
-Only call forward_query a second time for the same customer if they raise
-something genuinely different — a new problem, or an instruction that
-changes what the team needs to do (for example, first asking for same-day
-delivery, then separately asking you to cancel if that's not possible). A
-customer simply asking to be contacted sooner, or restating that nothing
-has happened yet, is not new information.
+Anything else — repeating the same complaint, asking for an update, asking
+to be contacted sooner, with nothing else changed — is not new information.
+Reassure them it is with the team and that they have the contact detail,
+and give order@cakecanteen.co.za as another way to reach them. Do not
+forward it again.
 
-Worked example (this exact pattern sent three emails for one issue in
-production, 2026-08-17):
+Worked example (a pattern that once sent three emails for one issue):
 Customer: I need this delivered today.
 (new problem — call forward_query)
 Customer: Cancel it if it's not coming today.
 (a new instruction, not a repeat of the first — call forward_query again)
 Customer: No one contacted me regarding the cancellation.
-(NOT new information — the issue is already forwarded. Do not call
-forward_query a third time. Instead: "I completely understand the
-frustration — this has already been flagged to the team as urgent, and
-they have your number. I don't want to send this a third time as it won't
-reach them any faster, but I'll make sure it's marked urgent." Reassure and
-stop there.)
+(the one allowed "nobody has contacted me" follow-up — call forward_query
+with "FOLLOW-UP: customer reports no contact yet about the cancellation
+request." Then: "I'm sorry nobody has been in touch yet. I've sent the
+team a follow-up marked urgent, and they have your number.")
+Customer: Still nothing?? Any update?
+(NOT new — the follow-up has already been sent. Do not forward again:
+"I'm sorry for the wait. It's with the team as urgent and they have your
+number. You can also email order@cakecanteen.co.za with your order
+number.")
+
+Worked example (a detail the team didn't have):
+Customer: Nobody at the collection point knows when my order arrives.
+Customer: 0821234567
+Customer: I don't know my order number.
+(call forward_query with the phone number and the problem)
+Customer: It's under the name Thandi Mokoena.
+(new detail that helps the team find the order — call forward_query with
+"FOLLOW-UP: the order is under the name Thandi Mokoena.")
+
+If forward_query or report_defect returns an error, do not tell the
+customer it was sent. Say there was a technical problem passing it on and
+that the team will still be notified, and give them order@cakecanteen.co.za
+with their order number in case they want to follow up directly.
 
 ## Defective or damaged orders
 
@@ -1105,6 +1181,7 @@ async def chat(session_id: str, body: ChatRequest):
         queue: asyncio.Queue = asyncio.Queue()
         tool_failed = False
         tool_failure_type: str | None = None
+        failures = _ToolFailureTracker(f"webchat session {session_id}")
 
         def _run_stream():
             try:
@@ -1133,14 +1210,17 @@ async def chat(session_id: str, body: ChatRequest):
                 continue
 
             if item is None:
+                failures.finish()
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 break
 
             if isinstance(item, Exception):
+                failures.finish()
                 yield f"data: {json.dumps({'type': 'error', 'message': str(item)})}\n\n"
                 break
 
             event = item
+            failures.observe(event)
 
             if event.type == "session.error":
                 err = getattr(event, "error", None)
@@ -1193,6 +1273,7 @@ async def chat(session_id: str, body: ChatRequest):
                 yield f"data: {json.dumps({'type': 'tool', 'name': event.name})}\n\n"
 
             elif event.type == "session.status_idle":
+                failures.finish()
                 if tool_failed:
                     executor.submit(
                         _send_tool_failure_alert,
@@ -1334,6 +1415,11 @@ def _escalation_email_html(emoji: str, title: str, rows: list[tuple[str, str]], 
     )
 
 
+def _email_dry_run(kind: str, fields: dict) -> bool:
+    print(f"[email] DRY RUN — {kind} not sent: {json.dumps(fields, default=str)[:300]}")
+    return True
+
+
 def _send_defect_email(report: dict) -> bool:
     """Send a defective order notification to the store owner via Resend REST API.
     Returns True on success, False on any failure."""
@@ -1341,6 +1427,8 @@ def _send_defect_email(report: dict) -> bool:
         print("[email] RESEND_API_KEY or STORE_OWNER_EMAIL not set — skipping email")
         return False
 
+    if EMAIL_DRY_RUN:
+        return _email_dry_run("defect report", report)
     esc = _html.escape
     html = _escalation_email_html("⚠️", "Defective Order Report", [
         ("Customer", report.get("customer_name", "Unknown")),
@@ -1376,12 +1464,17 @@ def _send_query_email(query: dict) -> bool:
         print("[email] RESEND_API_KEY or STORE_OWNER_EMAIL not set — skipping email")
         return False
 
+    if EMAIL_DRY_RUN:
+        return _email_dry_run("customer query", query)
     esc = _html.escape
-    html = _escalation_email_html("💬", "Customer Query", [
-        ("Customer", query.get("customer_name", "Unknown")),
+    rows = [("Customer", query.get("customer_name", "Unknown"))]
+    if query.get("order_number"):
+        rows.append(("Order number", query["order_number"]))
+    rows += [
         ("Question", query.get("query", "No details")),
         ("Contact", query.get("contact", "Not provided")),
-    ])
+    ]
+    html = _escalation_email_html("💬", "Customer Query", rows)
 
     try:
         with httpx.Client(timeout=15) as http:
@@ -1403,19 +1496,29 @@ def _send_query_email(query: dict) -> bool:
         return False
 
 
-def _send_tool_failure_alert(context: str, error_type: str) -> bool:
-    """Alert the store owner that a customer-facing tool call failed — the
-    agent may otherwise confabulate a result instead of surfacing this.
-    Returns True on success, False on any failure."""
-    if not RESEND_API_KEY or not STORE_OWNER_EMAIL:
-        print("[email] RESEND_API_KEY or STORE_OWNER_EMAIL not set — skipping email")
+def _send_tool_failure_alert(context: str, error_type: str,
+                             fallback_delivered: bool | None = None) -> bool:
+    """Alert EE (ALERT_EMAIL, else the store owner) that a customer-facing tool
+    call failed — the agent may otherwise confabulate a result instead of
+    surfacing this. Returns True on success, False on any failure."""
+    if not RESEND_API_KEY or not ALERT_EMAIL:
+        print("[email] RESEND_API_KEY or ALERT_EMAIL not set — skipping email")
         return False
 
+    if EMAIL_DRY_RUN:
+        return _email_dry_run("tool failure alert", {"context": context, "error": error_type,
+                                                      "fallback_delivered": fallback_delivered})
     esc = _html.escape
+    if fallback_delivered is None:
+        note = "A customer may have received a fallback message instead of a real answer."
+    elif fallback_delivered:
+        note = "The escalation email was delivered to the store by the app's fallback path."
+    else:
+        note = "The app's fallback delivery ALSO failed — this escalation has not reached the store."
     html = _escalation_email_html("🔧", "Tool call failed", [
         ("Error type", error_type),
         ("Context", context),
-    ], note="A customer may have received a fallback message instead of a real answer.")
+    ], note=note)
 
     try:
         with httpx.Client(timeout=15) as http:
@@ -1424,8 +1527,8 @@ def _send_tool_failure_alert(context: str, error_type: str) -> bool:
                 headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
                 json={
                     "from": RESEND_FROM,
-                    "to": [STORE_OWNER_EMAIL],
-                    "subject": f"🔧 Cake Canteen agent: tool failure ({esc(error_type)})",
+                    "to": [ALERT_EMAIL],
+                    "subject": f"🔧 Cake Canteen agent: tool failure ({esc(error_type[:80])})",
                     "html": html,
                 },
             )
@@ -1435,6 +1538,102 @@ def _send_tool_failure_alert(context: str, error_type: str) -> bool:
     except Exception as exc:
         print(f"[email] Failed to send tool failure alert: {exc}")
         return False
+
+
+ESCALATION_TOOLS = {"forward_query", "report_defect"}
+FALLBACK_TAG = "[Delivered by fallback after a tool error] "
+
+
+def _tool_result_text(event) -> str:
+    return " ".join(
+        getattr(block, "text", "") for block in (getattr(event, "content", None) or [])
+    ).strip()
+
+
+def _is_argument_error(text: str) -> bool:
+    """The model sent arguments the tool rejected — it normally retries without
+    them on its own, so this is not an outage."""
+    return "validation error for call[" in text or "unexpected_keyword_argument" in text
+
+
+def _deliver_escalation_fallback(tool_name: str, tool_input: dict | None) -> bool:
+    """Send a failed forward_query/report_defect email from the app itself.
+
+    A transport drop breaks the Anthropic → /mcp hop, not Resend, so the app can
+    still deliver what the agent tried to send."""
+    if not tool_input:
+        return False
+    if tool_name == "forward_query":
+        return _send_query_email({
+            "customer_name": tool_input.get("customer_name", "Not provided"),
+            "query": FALLBACK_TAG + str(tool_input.get("query", "")),
+            "contact": tool_input.get("contact", "Not provided"),
+            "order_number": _clean_order_number(tool_input.get("order_number")),
+        })
+    if tool_name == "report_defect":
+        return _send_defect_email({
+            "order_number": _clean_order_number(tool_input.get("order_number")) or "Not provided",
+            "customer_name": tool_input.get("customer_name", "Not provided"),
+            "issue": FALLBACK_TAG + str(tool_input.get("issue", "")),
+            "contact": tool_input.get("contact", "Not provided"),
+        })
+    return False
+
+
+class _ToolFailureTracker:
+    """Per-turn tracking of MCP tool failures as they actually arrive in production.
+
+    The session.error / mcp_* check in both streaming loops is what an auth
+    failure produces. A transport drop ("server terminated the MCP session")
+    instead arrives as an agent.mcp_tool_result with is_error=True and no
+    session.error at all, so it went uncaught — see Planned-Updates/28.09.2026.md.
+
+    A failure that a later call of the same tool in the turn recovers from is
+    cleared. Whatever is still failed when the turn ends gets an alert, and a
+    failed escalation is delivered by the app itself."""
+
+    def __init__(self, context: str):
+        self.context = context
+        self._names: dict[str, str] = {}
+        self._inputs: dict[str, dict] = {}
+        self._failed: dict[str, dict] = {}
+        self._finished = False
+
+    def observe(self, event) -> None:
+        if event.type == "agent.mcp_tool_use":
+            self._names[event.id] = event.name
+            if event.name in ESCALATION_TOOLS:
+                self._inputs[event.id] = dict(getattr(event, "input", None) or {})
+        elif event.type == "agent.mcp_tool_result":
+            ref = getattr(event, "mcp_tool_use_id", None)
+            name = self._names.get(ref, "unknown")
+            if not getattr(event, "is_error", False):
+                self._failed.pop(name, None)
+                return
+            text = _tool_result_text(event)
+            if _is_argument_error(text):
+                print(f"[tool] {name} rejected its arguments: {text[:120]}")
+                return
+            print(f"[tool] {name} failed: {text[:120]}")
+            self._failed[name] = {"error": text[:300], "input": self._inputs.get(ref)}
+
+    def finish(self) -> None:
+        """Call once when the turn ends. Email work runs off the request path."""
+        if self._finished or not self._failed:
+            self._finished = True
+            return
+        self._finished = True
+        failed = dict(self._failed)
+
+        def _flush():
+            for name, info in failed.items():
+                delivered = None
+                if name in ESCALATION_TOOLS:
+                    delivered = _deliver_escalation_fallback(name, info["input"])
+                    print(f"[tool] fallback delivery for {name}: {'sent' if delivered else 'FAILED'}")
+                _send_tool_failure_alert(self.context, f"{name}: {info['error']}", delivered)
+
+        executor.submit(_flush)
 
 
 # ── WhatsApp (Twilio) — set WHATSAPP_ENABLED = True in this file to activate ──
@@ -1475,6 +1674,7 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
     rate_limited = False
     tool_failed = False
     tool_failure_type: str | None = None
+    failures = _ToolFailureTracker(f"WhatsApp {phone_number}")
     try:
         with client.beta.sessions.events.stream(session_id) as stream:
             client.beta.sessions.events.send(
@@ -1487,6 +1687,7 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
                 ],
             )
             for event in stream:
+                failures.observe(event)
                 if event.type == "agent.custom_tool_use" and event.name == "search_products":
                     try:
                         results = _search_wc_products(
@@ -1532,9 +1733,11 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
                         rate_limited = True
                     break
     except Exception as exc:
+        failures.finish()
         print(f"[whatsapp] agent error: {exc}")
         _send_whatsapp_reply(phone_number, "Sorry, something went wrong. Please try again.")
         return
+    failures.finish()
 
     if rate_limited or tool_failed or not last_text:
         if tool_failed:
