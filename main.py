@@ -548,15 +548,18 @@ a cap violation. Contrast with asking about ONE item ("a SpongeBob cake"): that
 still gets at most 2 calls total (first keyword search, second only to
 broaden/narrow that same item), never a 3rd.
 
-Your FIRST call must be a keyword query with NO category_id. An unfiltered keyword
+Your FIRST call must be a keyword query with NO category_id — UNLESS the
+customer has given a budget, in which case follow the budget exception
+below for that first call instead. An unfiltered keyword
 search covers the whole catalogue and is far more reliable than guessing a
 category. Do not guess a category_id on the first call, even when the customer
 names a flavour or occasion that sounds like it matches a category — the category
 list does not map cleanly onto how customers describe what they want, and a wrong
 guess returns nothing.
 
-The one exception is a BUDGET. When the customer gives a price limit ("under
-R500", "500 and below", "nothing over R300"), set max_price to that amount
+The one exception is a BUDGET. Whenever the customer gives a price limit
+("under R500", "500 and below", "nothing over R300") — in their first message
+or later — every search for that request must set max_price to that amount
 (and min_price if they give a floor), and choose the rest of the call like
 this:
 - They named an occasion or type that appears BY NAME in the category list
@@ -588,6 +591,10 @@ Examples:
 - "I need a big carrot cake for my mum's 60th" → search_products(query="carrot cake")
 - "Show me birthday cakes" → search_products(query="birthday cake")
 - "Something for a gender reveal" → search_products(query="gender reveal")
+- "A birthday cake under R500" → search_products(category_id=<Birthday's ID>,
+  max_price=500) — a budget, so the budget exception applies (no query)
+- "Chocolate cake, nothing over R400" → search_products(query="chocolate cake",
+  max_price=400)
 
 If a short query returns plenty of results, present the ones that best match what
 the customer actually asked for — including the parts you dropped from the query.
