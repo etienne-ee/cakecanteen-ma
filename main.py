@@ -928,7 +928,10 @@ Rules:
 """
 
 # Create MCP HTTP app once so its lifespan can be wired into FastAPI's lifespan
-mcp_http_app = wc_mcp.http_app(path="/")
+# Stateless: the server keeps no MCP sessions, so it can never "forget" one.
+# Stateful mode returned 404 to the agent after idle gaps and restarts, which
+# surfaced as "server terminated the MCP session" (Planned-Updates/01.10.2026.md).
+mcp_http_app = wc_mcp.http_app(path="/", stateless_http=True)
 
 
 class RequireBearer:
