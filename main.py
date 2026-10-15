@@ -7,7 +7,7 @@ import secrets
 import threading
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import anthropic
@@ -93,6 +93,40 @@ def _clean_order_number(order_number) -> str | None:
         return None
     cleaned = str(order_number).lstrip("#").strip()
     return cleaned or None
+
+
+def _fulfilment_from_order(order: dict) -> dict:
+    """Pickup/delivery details from a WooCommerce order. Shared by get_order and the
+    escalation-email order lookup so the two cannot drift."""
+    meta = {m["key"]: m["value"] for m in order.get("meta_data", []) if isinstance(m, dict)}
+    fulfilment: dict = {"type": meta.get("delivery_type") or "unknown"}
+    if fulfilment["type"] == "pickup":
+        fulfilment.update({
+            "pickup_date": meta.get("pickup_date", ""),
+            "pickup_time": meta.get("pickup_time", ""),
+            "pickup_location": meta.get("pickup_location", ""),
+        })
+    elif fulfilment["type"] == "delivery":
+        fulfilment["delivery_date"] = meta.get("delivery_date", "")
+        # shipping_option is the normalised name; shipping_label is the full
+        # checkout label ("Economy Shipping (2-3 Business Days)"). The label's
+        # day counts are AUTHORITATIVE: Economy differs by shipping zone
+        # (Western Cape 2-3, rest of South Africa 3-5), so the label on the
+        # order is the zone-correct timeframe this customer actually saw and
+        # agreed to at checkout. An earlier version stripped it to avoid
+        # "competing numbers" — that was backwards; the prompt's flat figure
+        # was the wrong one (see Planned-Updates/06.08.2026.md Change 0).
+        lines = order.get("shipping_lines") or []
+        title = (lines[0].get("method_title") or "") if lines else ""
+        if "express" in title.lower():
+            fulfilment["shipping_option"] = "Express"
+        elif "economy" in title.lower():
+            fulfilment["shipping_option"] = "Economy"
+        elif title:
+            fulfilment["shipping_option"] = title
+        if title:
+            fulfilment["shipping_label"] = title
+    return fulfilment
 
 
 @wc_mcp.tool()
@@ -184,34 +218,7 @@ def get_order(order_number: str, email: str) -> str:
     if order.get("billing", {}).get("email", "").lower() != email.strip().lower():
         return json.dumps({"error": "The email address does not match this order. Please check and try again."})
 
-    meta = {m["key"]: m["value"] for m in order.get("meta_data", []) if isinstance(m, dict)}
-    fulfilment: dict = {"type": meta.get("delivery_type") or "unknown"}
-    if fulfilment["type"] == "pickup":
-        fulfilment.update({
-            "pickup_date": meta.get("pickup_date", ""),
-            "pickup_time": meta.get("pickup_time", ""),
-            "pickup_location": meta.get("pickup_location", ""),
-        })
-    elif fulfilment["type"] == "delivery":
-        fulfilment["delivery_date"] = meta.get("delivery_date", "")
-        # shipping_option is the normalised name; shipping_label is the full
-        # checkout label ("Economy Shipping (2-3 Business Days)"). The label's
-        # day counts are AUTHORITATIVE: Economy differs by shipping zone
-        # (Western Cape 2-3, rest of South Africa 3-5), so the label on the
-        # order is the zone-correct timeframe this customer actually saw and
-        # agreed to at checkout. An earlier version stripped it to avoid
-        # "competing numbers" — that was backwards; the prompt's flat figure
-        # was the wrong one (see Planned-Updates/06.08.2026.md Change 0).
-        lines = order.get("shipping_lines") or []
-        title = (lines[0].get("method_title") or "") if lines else ""
-        if "express" in title.lower():
-            fulfilment["shipping_option"] = "Express"
-        elif "economy" in title.lower():
-            fulfilment["shipping_option"] = "Economy"
-        elif title:
-            fulfilment["shipping_option"] = title
-        if title:
-            fulfilment["shipping_label"] = title
+    fulfilment = _fulfilment_from_order(order)
 
     return json.dumps({
         "order_number": order.get("number"),
@@ -254,17 +261,22 @@ def report_defect(order_number: str, customer_name: str, issue: str, contact: st
 
 @wc_mcp.tool()
 def forward_query(customer_name: str, query: str, contact: str,
-                  order_number: str | int | None = None) -> str:
+                  order_number: str | int | None = None, topic: str | None = None) -> str:
     """Forward a customer query to the store team by email.
     Call this when you cannot answer a question yourself — e.g. delivery timeframes,
     allergens, ingredients, shelf life, store policies, or order issues you cannot resolve.
     Requires the customer's name, a summary of their question, and a contact detail (email or phone).
-    Include order_number if the query is about a specific order and you have it."""
+    Include order_number if the query is about a specific order and you have it.
+    Always include topic: a 2-4 word label for what the email is about, shown in the
+    subject line so the team can tell emails apart at a glance, e.g. "Allergens",
+    "Collection time", "Delivery date", "Order not received", "Payment issue".
+    Do not put names, numbers or contact details in it."""
     sent = _send_query_email({
         "customer_name": customer_name,
         "query": query,
         "contact": contact,
         "order_number": _clean_order_number(order_number),
+        "topic": topic,
     })
     if sent:
         return f"Query forwarded successfully. The Cake Canteen team will follow up with {contact}."
@@ -1389,7 +1401,8 @@ def _create_wc_order(order_data: dict) -> dict:
         return resp.json()
 
 
-def _escalation_email_html(emoji: str, title: str, rows: list[tuple[str, str]], note: str = "") -> str:
+def _escalation_email_html(emoji: str, title: str, rows: list[tuple[str, str]], note: str = "",
+                           banner: str = "") -> str:
     """Shared CakeCart-branded shell for escalation emails. Inline CSS only -- Outlook
     strips <style> blocks and external stylesheets, so every rule has to live on the
     tag itself to render consistently across mail clients."""
@@ -1407,12 +1420,18 @@ def _escalation_email_html(emoji: str, title: str, rows: list[tuple[str, str]], 
         f'<p style="margin:14px 0 0;color:#767676;font-size:13px;">{esc(note)}</p>'
         if note else ""
     )
+    banner_html = (
+        f'<div style="background:#C62828;padding:12px 24px;color:#ffffff;font-size:14px;'
+        f'font-weight:700;">{esc(banner)}</div>'
+        if banner else ""
+    )
     return (
         '<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:0 auto;'
         'background:#ffffff;border:1px solid #e5e5e5;border-radius:8px;overflow:hidden;">'
         f'<div style="background:#B6E0F7;padding:20px 24px;">'
         f'<h1 style="margin:0;color:#212934;font-size:18px;font-weight:700;">{emoji} {esc(title)}</h1>'
         '</div>'
+        f'{banner_html}'
         '<div style="padding:8px 24px 24px;">'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
         f'style="border-collapse:collapse;">{row_html}</table>'
@@ -1423,6 +1442,149 @@ def _escalation_email_html(emoji: str, title: str, rows: list[tuple[str, str]], 
         '</div>'
         '</div>'
     )
+
+
+# ── Customer-query email: order context, urgency, subject ────────────────────
+# Every forward_query used to share one subject pattern, so a next-day cancellation
+# looked like any other query (order #51796, 2026-10-12; Planned-Updates/14.10.2026.md).
+# All of this is computed server-side from the query text and the WooCommerce order,
+# not left to the model.
+
+_CLOSED_ORDER_STATUSES = {"cancelled", "completed", "refunded", "failed", "trash"}
+
+
+def _order_context(order_number: str | None) -> dict | None:
+    """Status + fulfilment for an escalation email. Returns None on any failure
+    (no number, not found, network, bad JSON): the email must still go out, just
+    without order context. Never raises."""
+    if not order_number or not WC_CONSUMER_KEY:
+        return None
+    try:
+        order_id = int(str(order_number).lstrip("#").strip())
+        with httpx.Client(timeout=5) as http:
+            resp = http.get(
+                f"{WC_STORE_URL.rstrip('/')}/wp-json/wc/v3/orders/{order_id}",
+                params={"consumer_key": WC_CONSUMER_KEY, "consumer_secret": WC_CONSUMER_SECRET},
+                headers={"User-Agent": "Mozilla/5.0 (compatible; CakeCartBot/1.0)"},
+            )
+            resp.raise_for_status()
+            order = resp.json()
+        f = _fulfilment_from_order(order)
+        raw_date = f.get("pickup_date") if f["type"] == "pickup" else f.get("delivery_date")
+        try:
+            when = date.fromisoformat(str(raw_date or "")[:10])
+        except ValueError:
+            when = None
+        return {
+            "status": order.get("status") or "",
+            "type": f["type"],
+            "date": when,
+            "time": f.get("pickup_time", "") if f["type"] == "pickup" else "",
+            "place": f.get("pickup_location", "") if f["type"] == "pickup" else "",
+        }
+    except httpx.HTTPStatusError as exc:
+        # Never log str(exc): httpx embeds the full URL, and the WC key/secret are in its query string.
+        print(f"[email] order lookup failed for #{order_number}: HTTP {exc.response.status_code}")
+        return None
+    except Exception as exc:
+        print(f"[email] order lookup failed for #{order_number}: {type(exc).__name__}")
+        return None
+
+
+def _is_cancellation(query: str) -> bool:
+    return bool(re.search(r"cancel", query or "", re.I))
+
+
+def _urgency(ctx: dict | None, today: date) -> str | None:
+    """'TODAY' | 'TOMORROW' | 'PAST' when the order's pickup/dispatch date is today,
+    tomorrow or already gone and the order is still open; else None."""
+    if not ctx or not ctx.get("date"):
+        return None
+    if (ctx.get("status") or "").lower() in _CLOSED_ORDER_STATUSES:
+        return None
+    d = ctx["date"]
+    if d < today:
+        return "PAST"
+    if d == today:
+        return "TODAY"
+    if d == today + timedelta(days=1):
+        return "TOMORROW"
+    return None
+
+
+def _when_label(ctx: dict | None, with_time: bool = True) -> str:
+    """'pickup 13 Oct 16:00' / 'dispatch 13 Oct' ('' when the date is unknown)."""
+    if not ctx or not ctx.get("date"):
+        return ""
+    d = ctx["date"]
+    kind = "pickup" if ctx["type"] == "pickup" else "dispatch"
+    label = f"{kind} {d.day} {d:%b}"
+    start = (ctx.get("time") or "").split("-")[0].strip()
+    if with_time and ctx["type"] == "pickup" and start:
+        label += f" {start}"
+    return label
+
+
+def _clean_topic(topic) -> str:
+    """Model-supplied subject label -> safe single-line text, <= 40 chars, first letter
+    capitalised. Anything that isn't a non-empty string collapses to ''."""
+    if not isinstance(topic, str):
+        return ""
+    cleaned = re.sub(r"\s+", " ", topic).strip(" -—:#")
+    if not cleaned:
+        return ""
+    cleaned = cleaned[:40].rstrip()
+    return cleaned[0].upper() + cleaned[1:]
+
+
+def _query_subject(q: dict, ctx: dict | None, today: date) -> str:
+    """Plain-text subject (never HTML-escaped: Resend header-encodes it). Contact details
+    are deliberately never put in the subject."""
+    query = (q.get("query") or "").replace(FALLBACK_TAG, "", 1).lstrip()
+    number = q.get("order_number")
+    name = (q.get("customer_name") or "").strip()
+    named = bool(name) and name.lower() != "not provided"
+    topic = _clean_topic(q.get("topic"))
+    urgency = _urgency(ctx, today)
+    when = _when_label(ctx)
+    if urgency == "PAST" and when:
+        when += " (PAST)"
+
+    if _is_cancellation(query):
+        # The type of request is already the label; the topic would only repeat it.
+        if number:
+            subject = f"{'⏰ URGENT ' if urgency else '🚫 '}CANCELLATION — Order #{number}"
+            subject += f" — {when}" if when else ""
+        else:
+            subject = "🚫 CANCELLATION — no order number" + (f" — {name}" if named else "")
+    else:
+        if urgency and number:
+            parts = ([topic] if topic else []) + [f"Order #{number}"] + ([when] if when else [])
+            subject = "⏰ URGENT — " + " — ".join(parts)
+        elif number:
+            subject = f"💬 {topic or 'Customer query'} — Order #{number}"
+        elif topic:
+            subject = f"💬 {topic}" + (f" — {name}" if named else "")
+        else:
+            subject = f"💬 Customer query from {name or 'a customer'}"
+
+    if query.upper().startswith("FOLLOW-UP"):
+        subject = f"FOLLOW-UP — {subject}"
+    return subject
+
+
+def _urgency_banner(ctx: dict | None, urgency: str | None) -> str:
+    if not urgency or not ctx:
+        return ""
+    d = ctx["date"]
+    kind = "pickup" if ctx["type"] == "pickup" else "dispatch"
+    detail = f"{d.day} {d:%b}"
+    if ctx["type"] == "pickup":
+        detail += "".join(f", {x}" for x in (ctx.get("time"), ctx.get("place")) if x)
+    if urgency == "PAST":
+        return (f"⏰ TIME-SENSITIVE — the {kind} date has PASSED ({detail}) and the order "
+                f"is still {ctx.get('status') or 'open'}")
+    return f"⏰ TIME-SENSITIVE — {kind} is {urgency} ({detail})"
 
 
 def _email_dry_run(kind: str, fields: dict) -> bool:
@@ -1474,17 +1636,32 @@ def _send_query_email(query: dict) -> bool:
         print("[email] RESEND_API_KEY or STORE_OWNER_EMAIL not set — skipping email")
         return False
 
+    today = datetime.now(ZoneInfo("Africa/Johannesburg")).date()
+    ctx = _order_context(query.get("order_number"))
+    urgency = _urgency(ctx, today)
+    subject = _query_subject(query, ctx, today)
+    banner = _urgency_banner(ctx, urgency)
+
     if EMAIL_DRY_RUN:
-        return _email_dry_run("customer query", query)
-    esc = _html.escape
+        return _email_dry_run("customer query", {"SUBJECT": subject, "BANNER": banner, **query})
     rows = [("Customer", query.get("customer_name", "Unknown"))]
     if query.get("order_number"):
         rows.append(("Order number", query["order_number"]))
+    if ctx:
+        if ctx.get("status"):
+            rows.append(("Order status", ctx["status"]))
+        if ctx.get("date"):
+            rows.append(("Pickup" if ctx["type"] == "pickup" else "Dispatch",
+                         ", ".join(x for x in (f"{ctx['date'].day} {ctx['date']:%b %Y}",
+                                               ctx.get("time"), ctx.get("place")) if x)))
+    if _clean_topic(query.get("topic")):
+        rows.insert(0, ("Topic", _clean_topic(query.get("topic"))))
     rows += [
         ("Question", query.get("query", "No details")),
         ("Contact", query.get("contact", "Not provided")),
     ]
-    html = _escalation_email_html("💬", "Customer Query", rows)
+    title = "Cancellation request" if _is_cancellation(query.get("query", "")) else "Customer Query"
+    html = _escalation_email_html("🚫" if title.startswith("Cancel") else "💬", title, rows, banner=banner)
 
     try:
         with httpx.Client(timeout=15) as http:
@@ -1494,7 +1671,7 @@ def _send_query_email(query: dict) -> bool:
                 json={
                     "from": RESEND_FROM,
                     "to": [STORE_OWNER_EMAIL],
-                    "subject": f"💬 Customer query from {esc(query.get('customer_name', 'a customer'))}",
+                    "subject": subject,
                     "html": html,
                 },
             )
@@ -1579,6 +1756,7 @@ def _deliver_escalation_fallback(tool_name: str, tool_input: dict | None) -> boo
             "query": FALLBACK_TAG + str(tool_input.get("query", "")),
             "contact": tool_input.get("contact", "Not provided"),
             "order_number": _clean_order_number(tool_input.get("order_number")),
+            "topic": tool_input.get("topic"),
         })
     if tool_name == "report_defect":
         return _send_defect_email({
