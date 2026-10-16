@@ -38,6 +38,8 @@ RESEND_FROM        = os.getenv("RESEND_FROM", "CakeCart <onboarding@resend.dev>"
 # Tool-failure alerts are EE's infrastructure problem, not the store's — send
 # them to EE when ALERT_EMAIL is set, the store owner only as a fallback.
 ALERT_EMAIL        = os.getenv("ALERT_EMAIL") or STORE_OWNER_EMAIL
+AGENT_MODEL        = "claude-sonnet-5-5"
+AGENT_EFFORT       = "medium"
 # Local testing only: log emails instead of sending them. Every forward_query,
 # report_defect and tool alert otherwise lands in a real inbox. Never set on Railway.
 EMAIL_DRY_RUN      = os.getenv("EMAIL_DRY_RUN", "").lower() in ("1", "true", "yes")
@@ -1089,20 +1091,31 @@ async def lifespan(app: FastAPI):
             # Publish prompt changes as a new version of the same agent. New
             # sessions always resolve to the latest version; running sessions
             # keep the version they started on.
-            if agent.system != system_prompt:
+            # The model is compared too: it is only set on create, so without this a model
+            # bump in code never reaches the live agent.
+            live_model = getattr(agent.model, "id", agent.model)
+            live_effort = getattr(agent.model, "effort", None)
+            if isinstance(live_effort, dict):  # the API returns {"type": "high"}
+                live_effort = live_effort.get("type")
+            else:
+                live_effort = getattr(live_effort, "type", live_effort)
+            if agent.system != system_prompt or live_model != AGENT_MODEL or live_effort != AGENT_EFFORT:
                 updated = client.beta.agents.update(
                     agent_id,
                     version=agent.version,
                     system=system_prompt,
+                    model={"id": AGENT_MODEL, "effort": AGENT_EFFORT},
                 )
-                print(f"🔄 Prompt changed — agent updated to version {updated.version}")
+                print(f"🔄 Agent updated to version {updated.version} "
+                      f"(prompt changed: {agent.system != system_prompt}, "
+                      f"model: {live_model}/{live_effort} → {AGENT_MODEL}/{AGENT_EFFORT})")
             else:
                 print("♻️  Prompt unchanged — reusing current agent version")
         else:
             print("🚀 Creating Claude Managed Agent...")
             agent = client.beta.agents.create(
                 name="CakeCart Shopping Assistant",
-                model={"id": "claude-sonnet-4-6"},
+                model={"id": AGENT_MODEL, "effort": AGENT_EFFORT},
                 system=system_prompt,
                 mcp_servers=[
                     {
