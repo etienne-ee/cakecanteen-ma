@@ -1,33 +1,53 @@
+// Cake Canteen AI Shopping Assistant Widget
+//
+// Loaded on cakecanteen.co.za by the one-line embed in chat-widget-script.html
+// (WordPress: Avada → Options → Advanced → Code Fields → Space before </body>).
+// Widget changes ship by pushing this file to Railway, not by re-pasting into
+// WordPress; /static is served no-cache so browsers pick up a deploy at once.
 (function () {
-  'use strict';
-
-  // Resolve backend URL: prefer explicit data-backend attribute, then script src origin.
-  // data-backend is needed when the theme loads scripts deferred (document.currentScript is null).
+  // The backend is wherever this file was loaded from, so the one-line WordPress
+  // embed needs no editing. data-backend overrides it; the src lookup covers a
+  // theme that defers scripts (document.currentScript is null then).
   const _script = document.currentScript
     || Array.from(document.scripts).find(s => s.src && s.src.includes('/static/widget.js'));
   const BACKEND = (_script && _script.getAttribute('data-backend'))
-    || (_script ? new URL(_script.src).origin : window.location.origin);
+    || (_script ? new URL(_script.src).origin : 'https://web-production-d8a27a.up.railway.app');
 
-  // ── Inject CSS ────────────────────────────────────────────────────────────────
+  // Cake Canteen "cc" mark, 72x72 WebP (2x the 36px display size), inlined so
+  // the avatar costs no extra request. Made from static/avatar.jpg on 2026-10-26.
+  const CC_AVATAR = 'data:image/webp;base64,UklGRsYFAABXRUJQVlA4ILoFAAAwIACdASpIAEgAPikOhUIhhuIdkgYAoS0AGOyHMgvzv8QPyq6xzXftv+I2KlfNfzI/jvsAc5n/M/sl4QH6wf4j+Qe0R/JesA/YfrAP1A9g/9wPVP/xX7i/Aj+1H61/AR+sGaifxjs7/qtkM+qf5H+kcQO8K/mv+A+Y7jCeP/1D/Q8YHeh/bfjBqAHh1/6/9V84n5Z/jv2E+Ab+Q/17/mcC0Yym/VxZRos39Usw3I6g5ie41EI65R5MPnHYkP2yDU5zVzVg1XCc67Vqr41tzYjFHgBt0wAzO9J9FFOjXB2cXKicLNFLxd4eS8qSS0opzkM3f4I4GSeyf8cWUlIPfYWuttd7LNzEZBxkAAD+/6UJYRXAn8q+MBXLKsBPfyMhjrRBuyYgbePf57Dv/4mXE9KXTG8yy8dkF8sGJtUk57CpXJvYZiqZ96m0fPj1K++1xX9bZYJ2H/K+D2/uaQG/MpQg4uWHX8Q/hljiAcASGm39ROtG75f2bJ3F8dt0bRG/+CAnvc0EOjW/mFm7W4ZRzlCFBDoYBOstN07dHmbkH737raiVKqI9nEvvH+mpb4BE4uwdInFGsZyE5ztRYkFGlodIT6zEIGwpnqEcknma1IVphpuARt+p+mtES7nf0kjRxm+8KorNO8m7/jY2F4aLZf7alu0qrypmw96DRsf/cOnF4RWRZVhWZ77E6st2dLVP3oOVx0/Qr3/Hjj2LZq+ArQ8Vcq+/bvYm0YCwv4/8yWODB1yaQ5m07/olWur6SNYu62yCcK4Gj7JUytmgH8FaupdMd4gjpA5kBAdnb/35Ye7ACGis/B7Ez7aK4t9NOIOy8e40bb5qP/igJsJ99g9up8Q5lsFc2ngUXRqeXDvD4ddJ99ZPGpg76m5N++Xtf2/iaV/xV0IvTR+sYF6IO9PX/V6UWHzrdqjWZTUs5JnK6ShiHrMX/KHV/tTzeLsJL5T64sHNV7AGS9lCrStLvLaCi/z8XS9ANGO2SQ8Ijo0bDELwXhQxnIp7SmcZfxNhhwULNEhLr+bS9+pY6GNOJXvYRgdqzdW79v9jXf7jgS24+cr/BS8QyLMOiM+02boAaQBW7ZLhDQzu4fTcfyH38R4TlMMkIyiAp55eBKfwu/ZHvHkk0jHlZ8FJqouPxQ/oO5QNtWeNsfPY5jtseGQYtZJbx2OMP/zIpBSzlHBPXtjprWZVC2u1nF8I9EmqHGzAbh9PlmSWGtC6Pn1MmLZkovHKwPyugf8TE9NQDlU/UkZ8yS26oRNmwYJ71z+2P6QXLs5WufS7VdtznnkBYzi7csU075UBb7evhM/fQeSEdL/Zmzf0zGd+3b3lYZ8WLXVwIg5iFWhNs0Jv9LwQtpI+gqjduXg1Jb5Z943g6Ee2L717ls/9xDhqrpUccq75IJZ8ZdU7mvr9rN/PzcIZB/QpHL5ax6aMOlxkZ72/Mvx/8UPS3HQgqBfblHf9iL7d/6dTG55Uv5uxmJszTDK/VTWKV0fC5/dfI7d2h0MtzwiHBIAWzx9bmHzeUbxL08BGuwKFU4GU+keKmRNPzpkKnFKAIdxbozzPZPPW3/Dyl9+H6fnC8Zqc/Zo5bc2Ul0hhuvXh3bVmp7+OH9lt74PFQLkcOI/WFRSqhA2HoFN9X0zp8+R8X8dX52uZ1t+A/Y7qK6KnWSDhiOguVwoAoKMjG/ElivkmuKu9BHaAjuiZOz7fSU1+zrl2D9+kB4hYpal/9KT3pLQ16jvMDW/gv+LTcSWBiRhEZ84dofbtTLI2lav9AZSlUQpAtU2lBZRc03f9HpJPVnWtr/6aPLkx1RZwWSqwPB+nq334csb1iW/Uoz5Ay5LlIWcsDq0Ln4k6XLBEgaSBljVLc0okoZafhklhw6f4TSNyqdVz4Ppw4uMEGd9sueKs85YLmpTLloakgwupAndcwzfU2ScjA89JjNeaAzavT6in66aoD121CHPCyoAAAA==';
+
   const style = document.createElement('style');
   style.textContent = `
     #ai-chat-root {
-      position: fixed; bottom: 24px; right: 24px; z-index: 99999;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
-    #ai-chat-toggle {
-      width: 56px; height: 56px; border-radius: 50%;
-      background: #111; color: #fff; border: none; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.25);
-      transition: transform 0.2s, box-shadow 0.2s; margin-left: auto;
+    #cc-chat-tab {
+      position: fixed; left: 0; top: 50%; transform: translateY(-50%);
+      background: #B6E0F7; color: #fff; padding: 16px 10px;
+      border-radius: 0 8px 8px 0; cursor: pointer;
+      writing-mode: vertical-rl; text-orientation: mixed;
+      font-family: inherit; font-size: 14px; font-weight: 700;
+      box-shadow: 3px 0 12px rgba(0,0,0,0.15);
+      display: flex; align-items: center; gap: 6px;
+      z-index: 2147483647; user-select: none;
     }
-    #ai-chat-toggle:hover { transform: scale(1.08); box-shadow: 0 6px 20px rgba(0,0,0,0.3); }
+    #cc-chat-tab.chat-is-open { display: none; }
+    @media (max-width: 768px) {
+      #cc-chat-tab {
+        writing-mode: horizontal-tb; top: auto; bottom: 20px;
+        left: 50%; transform: translateX(-50%); border-radius: 50px;
+        padding: 14px 26px;
+      }
+    }
+    #cc-chat-close { display: none; }
     #ai-chat-window {
-      position: absolute; bottom: 70px; right: 0;
-      width: 360px; height: 520px; background: #fff; border-radius: 16px;
+      position: fixed; bottom: 80px; right: 24px; z-index: 99999;
+      width: 360px; height: 520px;
+      background: #fff; border-radius: 16px;
       box-shadow: 0 8px 40px rgba(0,0,0,0.18);
       display: none; flex-direction: column; overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       animation: ai-slide-up 0.2s ease;
     }
     #ai-chat-window.open { display: flex; }
@@ -36,15 +56,25 @@
       to   { opacity: 1; transform: translateY(0); }
     }
     #ai-chat-header {
-      background: #111; color: #fff; padding: 14px 16px;
-      display: flex; align-items: center;
+      background: #EC008C; color: #fff;
+      padding: 14px 16px; display: flex; align-items: center; justify-content: space-between;
     }
     #ai-chat-header-info { display: flex; align-items: center; gap: 10px; }
     #ai-chat-avatar {
-      width: 36px; height: 36px; background: rgba(255,255,255,0.15);
-      border-radius: 50%; display: flex; align-items: center; justify-content: center;
-      font-size: 12px; font-weight: 700;
+      width: 36px; height: 36px; border-radius: 50%; overflow: hidden;
+      background: rgba(255,255,255,0.15);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 12px; font-weight: 700; flex-shrink: 0;
     }
+    #ai-chat-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #ai-chat-header-close {
+      background: rgba(255,255,255,0.2); border: none; color: #fff;
+      border-radius: 50%; width: 28px; height: 28px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; line-height: 1; flex-shrink: 0;
+      transition: background 0.15s;
+    }
+    #ai-chat-header-close:hover { background: rgba(255,255,255,0.35); }
     #ai-chat-title  { font-weight: 600; font-size: 14px; }
     #ai-chat-status { font-size: 11px; opacity: 0.65; margin-top: 2px; }
     #ai-chat-messages {
@@ -57,10 +87,12 @@
     }
     .ai-msg a { color: inherit; text-decoration: underline; }
     .ai-msg--user {
-      background: #111; color: #fff; align-self: flex-end; border-bottom-right-radius: 4px;
+      background: #EC008C; color: #fff;
+      align-self: flex-end; border-bottom-right-radius: 4px;
     }
     .ai-msg--assistant {
-      background: #f4f4f4; color: #111; align-self: flex-start; border-bottom-left-radius: 4px;
+      background: #f4f4f4; color: #111;
+      align-self: flex-start; border-bottom-left-radius: 4px;
     }
     #ai-chat-typing { padding: 0 16px 10px; display: flex; gap: 4px; align-items: center; }
     #ai-chat-typing span {
@@ -74,96 +106,125 @@
       40% { transform: translateY(-5px); }
     }
     #ai-chat-input-area {
-      display: flex; align-items: center; gap: 8px; padding: 12px; border-top: 1px solid #eee;
+      display: flex; align-items: center; gap: 8px;
+      padding: 12px; border-top: 1px solid #eee;
     }
     #ai-chat-input {
-      flex: 1; padding: 9px 14px; border: 1.5px solid #e0e0e0; border-radius: 24px;
+      flex: 1; padding: 9px 14px;
+      border: 1.5px solid #e0e0e0; border-radius: 24px;
       font-size: 14px; outline: none; transition: border-color 0.15s;
     }
-    #ai-chat-input:focus { border-color: #111; }
+    #ai-chat-input:focus { border-color: #EC008C; }
     #ai-chat-send {
       width: 38px; height: 38px; border-radius: 50%;
-      background: #111; color: #fff; border: none; cursor: pointer;
+      background: #EC008C; color: #fff; border: none; cursor: pointer;
       display: flex; align-items: center; justify-content: center;
       flex-shrink: 0; transition: background 0.15s;
     }
-    #ai-chat-send:hover    { background: #333; }
+    #ai-chat-send:hover    { background: #C70074; }
     #ai-chat-send:disabled { background: #ccc; cursor: default; }
     .ai-order-confirmed {
-      background: #f0fdf4; border: 1.5px solid #86efac; border-radius: 12px;
-      padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; width: 100%;
+      background: #f0fdf4; border: 1.5px solid #86efac;
+      border-radius: 12px; padding: 14px 16px;
+      display: flex; flex-direction: column; gap: 4px; width: 100%;
     }
     .ai-order-confirmed__icon  { font-size: 20px; }
     .ai-order-confirmed__title { font-weight: 700; font-size: 14px; color: #15803d; }
     .ai-order-confirmed__number { font-size: 13px; color: #166534; }
     .ai-order-confirmed__note  { font-size: 11px; color: #16a34a; margin-top: 2px; }
     .ai-defect-reported {
-      background: #fffbeb; border: 1.5px solid #fcd34d; border-radius: 12px;
-      padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; width: 100%;
+      background: #fffbeb; border: 1.5px solid #fcd34d;
+      border-radius: 12px; padding: 14px 16px;
+      display: flex; flex-direction: column; gap: 4px; width: 100%;
     }
     .ai-defect-reported__icon  { font-size: 20px; }
     .ai-defect-reported__title { font-weight: 700; font-size: 14px; color: #92400e; }
     .ai-defect-reported__note  { font-size: 12px; color: #b45309; margin-top: 2px; }
+    #ai-chat-suggestions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 2px; }
+    .ai-chip {
+      border: 1.5px solid #EC008C; color: #EC008C; background: #fff;
+      border-radius: 16px; padding: 7px 12px; font-size: 13px;
+      cursor: pointer; transition: background 0.15s, color 0.15s; white-space: nowrap;
+    }
+    .ai-chip:hover { background: #EC008C; color: #fff; }
     .ai-product-grid {
-      display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; width: 100%; margin-top: 4px;
+      display: grid; grid-template-columns: repeat(2, 1fr);
+      gap: 8px; width: 100%; margin-top: 4px;
     }
     .ai-product-card {
       background: #fff; border: 1.5px solid #e8e8e8; border-radius: 12px;
-      overflow: hidden; text-decoration: none; color: #111;
-      transition: box-shadow 0.15s, transform 0.15s; display: flex; flex-direction: column;
+      overflow: hidden; color: #111;
+      transition: box-shadow 0.15s, transform 0.15s;
+      display: flex; flex-direction: column;
     }
     .ai-product-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.12); transform: translateY(-2px); }
     .ai-product-card__img  { width: 100%; aspect-ratio: 1; object-fit: cover; background: #f4f4f4; display: block; }
     .ai-product-card__img.loading { min-height: 120px; }
     .ai-product-card__info { padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 2px; flex: 1; }
     .ai-product-card__title {
-      font-size: 12px; font-weight: 600; line-height: 1.3; overflow: hidden;
-      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      font-size: 12px; font-weight: 600; line-height: 1.3;
+      overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
     }
     .ai-product-card__price { font-size: 12px; color: #555; margin-top: 2px; }
+    .ai-product-card__actions { margin-top: 6px; display: flex; gap: 4px; }
     .ai-product-card__cta {
-      margin-top: 6px; font-size: 11px; font-weight: 600; color: #fff;
-      background: #111; border-radius: 6px; padding: 4px 8px; text-align: center;
+      flex: 1; font-size: 11px; font-weight: 600; text-align: center;
+      color: #EC008C; border: 1.5px solid #EC008C; background: #fff;
+      border-radius: 6px; padding: 4px 6px; text-decoration: none;
+      transition: background 0.15s, color 0.15s;
     }
+    .ai-product-card__cta:hover { background: #EC008C; color: #fff; }
+    .ai-product-card__atc {
+      flex: 1; font-size: 11px; font-weight: 600; text-align: center; cursor: pointer;
+      color: #fff; background: #EC008C; border: none; border-radius: 6px; padding: 4px 6px;
+      transition: background 0.15s; line-height: 1.4;
+    }
+    .ai-product-card__atc:hover:not(:disabled) { background: #C70074; }
+    .ai-product-card__atc:disabled { background: #bbb; cursor: default; }
+    .ai-product-card__atc.added { background: #16a34a; }
   `;
   document.head.appendChild(style);
 
-  // ── Inject HTML ───────────────────────────────────────────────────────────────
+  // Left-side tab trigger
+  const tab = document.createElement('div');
+  tab.id = 'cc-chat-tab';
+  tab.innerHTML = '<span>🎂</span><span>Order Help</span>';
+  document.body.appendChild(tab);
+
+  // Close button (top-right when open)
+  const closeBtn = document.createElement('div');
+  closeBtn.id = 'cc-chat-close';
+  closeBtn.textContent = '✕';
+  document.body.appendChild(closeBtn);
+
+  // Chat window
   const root = document.createElement('div');
   root.id = 'ai-chat-root';
   root.innerHTML = `
-    <button id="ai-chat-toggle" aria-label="Open shopping assistant">
-      <span id="ai-chat-icon-open">
-        <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-        </svg>
-      </span>
-      <span id="ai-chat-icon-close" style="display:none">
-        <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-        </svg>
-      </span>
-    </button>
     <div id="ai-chat-window" aria-live="polite">
       <div id="ai-chat-header">
         <div id="ai-chat-header-info">
-          <div id="ai-chat-avatar">AI</div>
+          <div id="ai-chat-avatar">
+            <img src="${CC_AVATAR}" alt="Cake Canteen" width="36" height="36" />
+          </div>
           <div>
-            <div id="ai-chat-title">CakeCart Assistant</div>
+            <div id="ai-chat-title">Cake Canteen Assistant</div>
             <div id="ai-chat-status">Online</div>
           </div>
         </div>
+        <button id="ai-chat-header-close" aria-label="Close chat">✕</button>
       </div>
       <div id="ai-chat-messages">
-        <div class="ai-msg ai-msg--assistant">
-          👋 Hi! I can help you find products, check prices, and place your order. What are you looking for?
-        </div>
+        <div class="ai-msg ai-msg--assistant">Hi there! 🍰 Welcome to CakeCanteen!
+
+Craving something sweet? 😋 Ask me anything — I can help you find the perfect cake, check prices, place an order, or sort out a question about a delivery or existing order. What can I help you with today? 🎂</div>
+        <div id="ai-chat-suggestions"></div>
       </div>
       <div id="ai-chat-typing" style="display:none">
         <span></span><span></span><span></span>
       </div>
       <div id="ai-chat-input-area">
-        <input type="text" id="ai-chat-input" placeholder="Search products, ask questions…" autocomplete="off" />
+        <input type="text" id="ai-chat-input" placeholder="Search products, ask questions..." autocomplete="off" />
         <button id="ai-chat-send" aria-label="Send message">
           <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <line x1="22" y1="2" x2="11" y2="13"/>
@@ -175,19 +236,50 @@
   `;
   document.body.appendChild(root);
 
-  // ── App ───────────────────────────────────────────────────────────────────────
   let sessionId = null;
   let isOpen    = false;
   let isBusy    = false;
 
-  const toggle    = document.getElementById('ai-chat-toggle');
-  const window_   = document.getElementById('ai-chat-window');
-  const messages  = document.getElementById('ai-chat-messages');
-  const input     = document.getElementById('ai-chat-input');
-  const sendBtn   = document.getElementById('ai-chat-send');
-  const typing    = document.getElementById('ai-chat-typing');
-  const iconOpen  = document.getElementById('ai-chat-icon-open');
-  const iconClose = document.getElementById('ai-chat-icon-close');
+  function renderText(el, text) {
+    el.textContent = '';
+    const linkRe = /\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g;
+    let last = 0, m;
+    while ((m = linkRe.exec(text)) !== null) {
+      if (m.index > last) el.appendChild(document.createTextNode(text.slice(last, m.index)));
+      try {
+        const u = new URL(m[2]);
+        if (u.protocol !== 'https:' && u.protocol !== 'http:') throw 0;
+        const a = document.createElement('a');
+        a.href = u.href; a.target = '_blank'; a.rel = 'noopener noreferrer';
+        a.textContent = m[1];
+        el.appendChild(a);
+      } catch { el.appendChild(document.createTextNode(m[0])); }
+      last = m.index + m[0].length;
+    }
+    if (last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
+  }
+
+  const window_     = document.getElementById('ai-chat-window');
+  const messages    = document.getElementById('ai-chat-messages');
+  const input       = document.getElementById('ai-chat-input');
+  const sendBtn     = document.getElementById('ai-chat-send');
+  const typing      = document.getElementById('ai-chat-typing');
+  const suggestions = document.getElementById('ai-chat-suggestions');
+  const headerClose = document.getElementById('ai-chat-header-close');
+
+  const CHIPS = [
+    { label: '🎂 Find a cake',            message: "I'm looking for a cake — what do you have?" },
+    { label: '🚚 Delivery & collection',  message: 'Can you tell me about delivery and collection options?' },
+    { label: '📦 Ask about my order',     message: 'I have a question about my order.' },
+    { label: '😟 Report a problem',       message: 'My order arrived damaged.' },
+  ];
+  CHIPS.forEach(({ label, message }) => {
+    const btn = document.createElement('button');
+    btn.className = 'ai-chip';
+    btn.textContent = label;
+    btn.addEventListener('click', () => { input.value = message; sendMessage(); });
+    suggestions.appendChild(btn);
+  });
 
   async function ensureSession() {
     if (sessionId) return;
@@ -195,35 +287,20 @@
       const res  = await fetch(`${BACKEND}/api/sessions`, { method: 'POST' });
       const data = await res.json();
       sessionId  = data.session_id;
-    } catch {
-      appendMessage('assistant', '⚠️ Could not connect to the assistant. Please try again later.');
+    } catch (err) {
+      appendMessage('assistant', 'Could not connect to the assistant. Please try again later.');
     }
   }
 
-  toggle.addEventListener('click', async () => {
+  async function toggleAiChat() {
     isOpen = !isOpen;
     window_.classList.toggle('open', isOpen);
-    iconOpen.style.display  = isOpen ? 'none' : '';
-    iconClose.style.display = isOpen ? ''     : 'none';
+    tab.classList.toggle('chat-is-open', isOpen);
     if (isOpen) { await ensureSession(); input.focus(); }
-  });
-
-  // Render text with markdown links ([label](url)) as real <a> elements.
-  // All text nodes use createTextNode — no innerHTML for agent/user content.
-  function renderText(el, text) {
-    while (el.firstChild) el.removeChild(el.firstChild);
-    const linkRe = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g;
-    let last = 0, m;
-    while ((m = linkRe.exec(text)) !== null) {
-      if (m.index > last) el.appendChild(document.createTextNode(text.slice(last, m.index)));
-      const a = document.createElement('a');
-      a.href = m[2]; a.target = '_blank'; a.rel = 'noopener';
-      a.textContent = m[1];
-      el.appendChild(a);
-      last = linkRe.lastIndex;
-    }
-    if (last < text.length) el.appendChild(document.createTextNode(text.slice(last)));
   }
+
+  tab.addEventListener('click', toggleAiChat);
+  headerClose.addEventListener('click', toggleAiChat);
 
   function appendMessage(role, text) {
     const div = document.createElement('div');
@@ -237,23 +314,10 @@
   function appendOrderConfirmed(orderNumber) {
     const card = document.createElement('div');
     card.className = 'ai-order-confirmed';
-
-    const icon = document.createElement('div');
-    icon.className = 'ai-order-confirmed__icon';
-    icon.textContent = '✅';
-
-    const title = document.createElement('div');
-    title.className = 'ai-order-confirmed__title';
-    title.textContent = 'Order confirmed!';
-
-    const num = document.createElement('div');
-    num.className = 'ai-order-confirmed__number';
-    num.textContent = `Order #${orderNumber}`;
-
-    const note = document.createElement('div');
-    note.className = 'ai-order-confirmed__note';
-    note.textContent = 'Payment collected on delivery — no card needed.';
-
+    const icon = document.createElement('div'); icon.className = 'ai-order-confirmed__icon'; icon.textContent = '✅';
+    const title = document.createElement('div'); title.className = 'ai-order-confirmed__title'; title.textContent = 'Order confirmed!';
+    const num = document.createElement('div'); num.className = 'ai-order-confirmed__number'; num.textContent = 'Order #' + orderNumber;
+    const note = document.createElement('div'); note.className = 'ai-order-confirmed__note'; note.textContent = 'Payment collected on delivery — no card needed.';
     card.append(icon, title, num, note);
     messages.appendChild(card);
     messages.scrollTop = messages.scrollHeight;
@@ -262,62 +326,92 @@
   function appendDefectReported(orderNumber) {
     const card = document.createElement('div');
     card.className = 'ai-defect-reported';
-
-    const icon = document.createElement('div');
-    icon.className = 'ai-defect-reported__icon';
-    icon.textContent = '📋';
-
-    const title = document.createElement('div');
-    title.className = 'ai-defect-reported__title';
-    title.textContent = 'Report submitted';
-
-    const note = document.createElement('div');
-    note.className = 'ai-defect-reported__note';
-    note.textContent = (orderNumber ? `Order ${orderNumber} — ` : '') + 'The store team has been notified and will follow up within 24 hours.';
-
+    const icon = document.createElement('div'); icon.className = 'ai-defect-reported__icon'; icon.textContent = '📋';
+    const title = document.createElement('div'); title.className = 'ai-defect-reported__title'; title.textContent = 'Report submitted';
+    const note = document.createElement('div'); note.className = 'ai-defect-reported__note';
+    note.textContent = (orderNumber ? 'Order ' + orderNumber + ' — ' : '') + 'The store team has been notified and will follow up within 24 hours.';
     card.append(icon, title, note);
     messages.appendChild(card);
     messages.scrollTop = messages.scrollHeight;
+  }
+
+  async function addToCartAjax(productId, btn) {
+    if (!window.wc_add_to_cart_params) {
+      btn.textContent = 'Visit site →';
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Adding…';
+    try {
+      const ajaxUrl = window.wc_add_to_cart_params.wc_ajax_url.replace('%%endpoint%%', 'add_to_cart');
+      const body = new FormData();
+      body.append('product_id', productId);
+      body.append('quantity', 1);
+      const res = await fetch(ajaxUrl, { method: 'POST', body, credentials: 'same-origin' });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      btn.textContent = 'Added ✓';
+      btn.classList.add('added');
+      if (window.jQuery) window.jQuery(document.body).trigger('wc_fragment_refresh');
+    } catch {
+      btn.textContent = 'Failed';
+      btn.disabled = false;
+    }
   }
 
   function appendProductCards(products) {
     if (!products || !products.length) return;
     const grid = document.createElement('div');
     grid.className = 'ai-product-grid';
-
     products.forEach(p => {
-      const a = document.createElement('a');
-      a.className = 'ai-product-card';
-      a.href = p.url || '#';
-      a.target = '_blank'; a.rel = 'noopener';
+      const card = document.createElement('div');
+      card.className = 'ai-product-card';
 
+      let productUrl = '#';
+      try {
+        const u = new URL(p.url);
+        if (u.protocol === 'https:' || u.protocol === 'http:') productUrl = u.href;
+      } catch {}
+
+      const imgLink = document.createElement('a');
+      imgLink.href = productUrl; imgLink.target = '_blank'; imgLink.rel = 'noopener noreferrer';
       const img = document.createElement('img');
       img.className = 'ai-product-card__img loading';
       img.alt = p.title || '';
       img.onload  = () => img.classList.remove('loading');
       img.onerror = () => { img.style.display = 'none'; };
       if (p.image_url) img.src = p.image_url;
+      imgLink.appendChild(img);
 
       const info = document.createElement('div');
       info.className = 'ai-product-card__info';
+      const titleEl = document.createElement('div'); titleEl.className = 'ai-product-card__title'; titleEl.textContent = p.title || '';
+      const priceEl = document.createElement('div'); priceEl.className = 'ai-product-card__price'; priceEl.textContent = p.price || '';
 
-      const titleEl = document.createElement('div');
-      titleEl.className = 'ai-product-card__title';
-      titleEl.textContent = p.title || '';
+      const actions = document.createElement('div');
+      actions.className = 'ai-product-card__actions';
 
-      const priceEl = document.createElement('div');
-      priceEl.className = 'ai-product-card__price';
-      priceEl.textContent = p.price || '';
+      const viewLink = document.createElement('a');
+      viewLink.className = 'ai-product-card__cta';
+      viewLink.href = productUrl; viewLink.target = '_blank'; viewLink.rel = 'noopener noreferrer';
+      viewLink.textContent = 'View →';
 
-      const cta = document.createElement('div');
-      cta.className = 'ai-product-card__cta';
-      cta.textContent = 'View product →';
+      const atcBtn = document.createElement('button');
+      atcBtn.className = 'ai-product-card__atc';
+      const inStock = !p.stock_status || p.stock_status === 'instock';
+      if (inStock && p.id) {
+        atcBtn.textContent = 'Add to cart';
+        atcBtn.addEventListener('click', () => addToCartAjax(p.id, atcBtn));
+      } else {
+        atcBtn.textContent = 'Out of stock';
+        atcBtn.disabled = true;
+      }
 
-      info.append(titleEl, priceEl, cta);
-      a.append(img, info);
-      grid.appendChild(a);
+      actions.append(viewLink, atcBtn);
+      info.append(titleEl, priceEl, actions);
+      card.append(imgLink, info);
+      grid.appendChild(card);
     });
-
     messages.appendChild(grid);
     messages.scrollTop = messages.scrollHeight;
   }
@@ -329,6 +423,7 @@
     isBusy = true;
     input.value = '';
     sendBtn.disabled = true;
+    suggestions.style.display = 'none';
     appendMessage('user', text);
 
     typing.style.display = 'flex';
@@ -381,13 +476,13 @@
             typing.style.display = 'none';
           } else if (event.type === 'error') {
             typing.style.display = 'none';
-            bubble.textContent = '⚠️ ' + (event.message || 'Something went wrong. Please try again.');
+            bubble.textContent = 'Something went wrong: ' + (event.message || 'Please try again.');
           }
         }
       }
-    } catch {
+    } catch (err) {
       typing.style.display = 'none';
-      bubble.textContent = '⚠️ Connection lost. Please try again.';
+      bubble.textContent = 'Connection lost. Please try again.';
     }
 
     isBusy = false;

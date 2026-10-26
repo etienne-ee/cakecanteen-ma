@@ -5,6 +5,7 @@ import html as _html
 import re
 import secrets
 import threading
+import time
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
@@ -147,19 +148,20 @@ def _fulfilment_from_order(order: dict, today: date | None = None) -> dict:
     return fulfilment
 
 
-@wc_mcp.tool()
-def search_products(query: str, category_id: int = 0, per_page: int = 10,
-                    min_price: float = 0, max_price: float = 0) -> str:
-    """Search for published products in the CakeCart WooCommerce store.
-    Pass category_id to filter by product category (preferred for type/flavour queries).
-    Pass query for keyword search within a category or across all products.
-    Pass max_price (and/or min_price), in rand, when the customer gives a budget.
-    Returns product IDs, names, prices, images, stock status, and permalinks."""
+def _wc_search(query: str = "", category_id: int = 0, per_page: int = 10,
+               min_price: float = 0, max_price: float = 0) -> list[dict]:
+    """One WooCommerce product search, shared by search_products and
+    search_products_batch. Fetches 50 and keeps per_page: the title re-ranking
+    below needs the wider set, or a good name match ranked 30th by WooCommerce
+    never reaches the agent."""
     per_page = min(per_page, 25)
 
     params: dict = {
         "per_page": 50,
         "status": "publish",
+        # Only the fields read below: a 50-product search drops from ~1 MB to
+        # ~180 KB, ~1.2s faster (measured 2026-10-26). Same products, same order.
+        "_fields": "id,name,price,permalink,images,categories,stock_status",
         "consumer_key": WC_CONSUMER_KEY,
         "consumer_secret": WC_CONSUMER_SECRET,
     }
@@ -191,7 +193,7 @@ def search_products(query: str, category_id: int = 0, per_page: int = 10,
         title_hits = [p for p in products if _title_score(p) > 0]
         products = sorted(title_hits or products, key=_title_score, reverse=True)
 
-    return json.dumps([
+    return [
         {
             "id": p["id"],
             "title": p["name"],
@@ -205,7 +207,49 @@ def search_products(query: str, category_id: int = 0, per_page: int = 10,
             "stock_status": p.get("stock_status", "instock"),
         }
         for p in products[:per_page]
-    ])
+    ]
+
+
+@wc_mcp.tool()
+def search_products(query: str, category_id: int = 0, per_page: int = 10,
+                    min_price: float = 0, max_price: float = 0) -> str:
+    """Search for published products in the CakeCart WooCommerce store.
+    Pass category_id to filter by product category (preferred for type/flavour queries).
+    Pass query for keyword search within a category or across all products.
+    Pass max_price (and/or min_price), in rand, when the customer gives a budget.
+    Returns product IDs, names, prices, images, stock status, and permalinks."""
+    started = time.monotonic()
+    results = _wc_search(query, category_id, per_page, min_price, max_price)
+    print(f"🔎 search_products: 1 search in {time.monotonic() - started:.1f}s")
+    return json.dumps(results)
+
+
+class ProductSearch(BaseModel):
+    query: str = ""
+    category_id: int = 0
+    per_page: int = 10
+    min_price: float = 0
+    max_price: float = 0
+
+
+@wc_mcp.tool()
+def search_products_batch(searches: list[ProductSearch]) -> str:
+    """Run up to 5 product searches at the same time, in one call.
+    Use this instead of several search_products calls whenever you need more than one
+    search in the same turn, for example when the customer names more than one item.
+    Each search takes the same fields as search_products.
+    Returns one entry per search, in the same order: the search you asked for and its products."""
+    searches = searches[:5]
+    started = time.monotonic()
+    # Any failed search fails the whole call (f.result() re-raises): the tool-failure
+    # alert and the drop-the-reply guard only see call-level errors, so a partial
+    # result would slip past both.
+    with ThreadPoolExecutor(max_workers=len(searches) or 1) as pool:
+        futures = [pool.submit(_wc_search, **s.model_dump()) for s in searches]
+        results = [{"search": s.model_dump(), "products": f.result()}
+                   for s, f in zip(searches, futures)]
+    print(f"🔎 search_products_batch: {len(searches)} searches in {time.monotonic() - started:.1f}s")
+    return json.dumps(results)
 
 
 @wc_mcp.tool()
@@ -562,28 +606,54 @@ Monday to Friday 08:00-17:00, Saturday 09:00-14:00. These apply to Cake Canteen 
 
 ## Search strategy
 
+When the customer's message is exactly "I'm looking for a cake — what do you
+have?" (sent by the "Find a cake" button in the chat widget), do NOT search.
+Answer from the Product categories list above: in two or three plain sentences,
+say what kinds of cakes and treats Cake Canteen offers (group the main
+categories, for example birthday and celebration cakes, bento cakes, cupcakes,
+cake slices; leave out admin categories like "Cape Town Only" or
+"Uncategorized"), then ask ONE question to narrow it down — what's the
+occasion, and do they have a flavour or budget in mind. No product cards and no
+products block in this reply, because no products were searched.
+
+As soon as the customer names something specific (a flavour, an occasion, a
+type, a budget), search for it using the rules below.
+
 Always call search_products with per_page set to 10 or less — never exceed 25.
 
 Make ONE search call per customer request, then answer from its results.
 
-A customer message can name more than one distinct item in one turn — that is
-several requests bundled together, not one. The 2-call limit below is per
-ITEM, not per message: search each distinct item separately (one call each,
-unless a given item's own search needs the second broaden/narrow call), then
-answer covering everything found. A compound message naming several items
-does not count against the cap just for naming several things — but retrying
-the SAME item's search a 3rd time is still forbidden, no matter how many other
+When you need more than one search in the same turn, make them ALL in ONE
+search_products_batch call — never several search_products calls one after
+another. This covers a customer naming several items, and also any time you
+want to look in more than one category at once. One search_products_batch call
+replaces all of those calls, and the customer waits once instead of once per
+search.
+
+Each search in the batch counts as the FIRST call for its own item. The 2-call
+limit below is still per ITEM, not per message: if an item comes back empty,
+its broaden/narrow retry is that item's second and last call. Retry only the
+empty items, all in one batch (or one search_products if only one is empty).
+Retrying the SAME item a 3rd time is still forbidden, no matter how many other
 items are in the same message.
 
 Example — "Kids birthday, rainbow, a double bento, SpongeBob" names THREE
 items (rainbow, bento, SpongeBob), not one request repeated three ways:
-- search_products(query="rainbow cake") → found, present it
-- search_products(query="bento cake") → found, present it
-- search_products(query="SpongeBob") → nothing found, say so and offer to forward
-Three calls, three different items, each searched once — this is correct, not
-a cap violation. Contrast with asking about ONE item ("a SpongeBob cake"): that
-still gets at most 2 calls total (first keyword search, second only to
-broaden/narrow that same item), never a 3rd.
+- ONE call: search_products_batch(searches=[
+    {{"query": "rainbow cake"}}, {{"query": "bento cake"}}, {{"query": "SpongeBob"}}])
+- rainbow and bento found, SpongeBob empty → ONE retry for SpongeBob only,
+  e.g. search_products(query="SpongeBob cake"), or say nothing matched and
+  offer to forward.
+Contrast with asking about ONE item ("a SpongeBob cake"): that uses
+search_products and gets at most 2 calls total (first keyword search, second
+only to broaden/narrow that same item), never a 3rd.
+
+Example — "Rainbow dot cake in a cup and a Max is Back cake" →
+search_products_batch(searches=[{{"query": "rainbow cup"}}, {{"query": "Max is Back"}}])
+
+For a single item, keep using search_products. Every rule below about the
+first call (keyword with no category_id, the budget exception, short queries)
+applies to each search inside a batch too.
 
 Your FIRST call must be a keyword query with NO category_id — UNLESS the
 customer has given a budget, in which case follow the budget exception
@@ -1156,6 +1226,19 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def _no_cache_static(request: Request, call_next):
+    # widget.js ships fixes by redeploying, not by re-pasting into WordPress,
+    # so a browser (or an intermediate cache) serving a stale cached copy
+    # after a deploy would silently undo whatever the fix was. force
+    # revalidation on every load; the ETag Starlette already sets makes an
+    # unchanged file a cheap 304, not a full re-download.
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/mcp", RequireBearer(mcp_http_app, MCP_SHARED_SECRETS, MCP_AUTH_MODE))

@@ -5,8 +5,8 @@ Shopping assistant for [CakeCart](https://cakecanteen.co.za/ ) built on Claude M
 ## Stack
 
 - **Backend:** FastAPI + uvicorn
-- **AI:** Claude Managed Agents (`claude-sonnet-4-6`)
-- **E-commerce:** WooCommerce REST API — custom `search_products` tool (no native MCP)
+- **AI:** Claude Managed Agents (`claude-sonnet-5-5`, effort `medium` — `AGENT_MODEL` / `AGENT_EFFORT` in `main.py`)
+- **E-commerce:** WooCommerce REST API, called by MCP tools served from this app at `/mcp` (`search_products`, `search_products_batch`, `get_order`, …)
 - **Email alerts:** Resend
 - **WhatsApp:** Twilio (active — `WHATSAPP_ENABLED = True` in `main.py`, see below)
 
@@ -53,7 +53,16 @@ To deactivate, set `WHATSAPP_ENABLED = False` in `main.py` and restart.
 
 ## WooCommerce product search
 
-Products are searched via `GET /wp-json/wc/v3/products?search=...`. The agent calls the custom `search_products` tool — the server executes the WooCommerce API call synchronously within the stream thread and returns results directly to the agent. Product IDs are integers (not Shopify-style GIDs).
+Products are searched via `GET /wp-json/wc/v3/products?search=...` (with `_fields`, so only the fields the agent uses come back). Two MCP tools share one helper, `_wc_search`:
+
+- `search_products` — one search.
+- `search_products_batch` — up to 5 searches run at the same time in one call. Anthropic's runtime runs MCP tool calls one at a time, so several `search_products` calls in a turn wait for each other; one batch call doesn't. Measured 2026-10-26: 2–3 searches together ≈ one search.
+
+Both log a `🔎 … searches in Ns` line. Product IDs are integers (not Shopify-style GIDs). The "🎂 Find a cake" widget button's message is answered from the prompt's category list with no search (see `Planned-Updates/26.10.2026.md`).
+
+## Chat widget
+
+The widget is `static/widget.js`, served from Railway. WordPress holds only the one-line embed in `chat-widget-script.html` (Avada → Options → Advanced → Code Fields → Space before `</body>` — confirm on first edit). `/static` is served `no-cache` + ETag, so **widget changes ship with a push**, the same as agent changes: no re-pasting into WordPress. The avatar is inlined in `widget.js` as a data URI.
 
 ## Order creation
 
