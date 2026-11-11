@@ -311,6 +311,9 @@ def get_order(order_number: str, email: str) -> str:
     })
 
 
+HANDOFF_FAILED_MESSAGE = "Email delivery failed: this was NOT sent to the team."
+
+
 @wc_mcp.tool()
 def report_defect(order_number: str, customer_name: str, issue: str, contact: str) -> str:
     """Report a defective, damaged, or wrong order to the store team by email.
@@ -325,7 +328,10 @@ def report_defect(order_number: str, customer_name: str, issue: str, contact: st
     })
     if sent:
         return f"Report sent successfully for order #{order_number}. The store team has been notified and will follow up with {contact}."
-    return "Could not send report — email is not configured on the server. Advise the customer to contact the store directly."
+    # Raise, don't return text: a failed send must arrive as is_error so the
+    # agent, _ToolFailureTracker, the analyzer and nightly QA all see it
+    # (Planned-Updates/11.11.2026.md — the Oct outage hid behind is_error=false).
+    raise RuntimeError(HANDOFF_FAILED_MESSAGE)
 
 
 @wc_mcp.tool()
@@ -349,7 +355,7 @@ def forward_query(customer_name: str, query: str, contact: str,
     })
     if sent:
         return f"Query forwarded successfully. The Cake Canteen team will follow up with {contact}."
-    return "Could not send the query — email is not configured on the server. Advise the customer to contact the store directly at order@cakecanteen.co.za."
+    raise RuntimeError(HANDOFF_FAILED_MESSAGE)  # see report_defect
 
 
 @wc_mcp.tool()
@@ -610,6 +616,14 @@ Wrong: "They're open from 08:00, so you can pop in any time after that."
 Once you have looked the order up, give its slot and location (see the order rules below).
 Engen Hillside is the one exception to listing only opening hours: its collection window, 13:00-16:00, is stated above.
 
+### When a customer says they're on their way
+Customers often message to say they're on their way, nearly there or have arrived ("I'm 5 minutes away", "on my way", "I'm here", "please let them know I'm coming"). Do not forward this and do not offer to tell the team. The team works from email and will not see it before the customer arrives, and the collection point already has the order.
+- Arriving in their slot, or you don't know their slot: reply in one short message. Say their order will be ready in their collection slot, where to go, and to give their order number at the counter. If you looked the order up earlier in the conversation, use its slot and location. Do not look it up just for this.
+- Arriving before their slot opens (you know the slot and the time): give the slot and say the order may not be ready before it starts.
+- At the collection point and something is wrong (the order isn't there, the point is closed): this is a problem report, so follow the order rules below. In the same message, tell them to ask the staff at the collection point with their order number, because they are the only people who can help on the spot. When you forward, say plainly that the team works by email and may not see it straight away.
+Right: Customer: "Almost at Hertex Gardens, 5 min." You: "Lovely, order 48120 is ready in your 15:00 - 16:00 slot at the Hertex Gardens showroom. Just give your order number at the counter."
+Wrong: (calls forward_query with "Customer is 5 minutes away") "I've let the team know you're on your way."
+
 ### Retail store trading hours
 Monday to Friday 08:00-17:00, Saturday 09:00-14:00. These apply to Cake Canteen retail stores; collection point hours are listed per location above.
 
@@ -845,7 +859,7 @@ Do not ask for the email a third time. On WhatsApp you already hold the customer
 Separately from a failed lookup, a customer may tell you something IS wrong (the order isn't at the collection point, it hasn't arrived, it's missing), or ask for something only the team can do (switching collection to delivery, changing a date). The rule is the same every time: look first, say what you found, offer the team in one short line, and forward only after a yes.
 
 1. If you have BOTH the order number and the email, call get_order first. If you have only one of them, tell the customer you can't open the order without both and go to step 3. Do not keep asking for the missing one a third time.
-2. Say what you found in a line or two: the pickup slot and location, or the dispatch date and shipping timeframe, and the status. Never state a conclusion the order data does not show.
+2. Say what you found in a line or two: the pickup slot and location, or the dispatch date and shipping timeframe, and the status. Never state a conclusion the order data does not show. If what you found already answers them, stop there and do not offer the team. For example, they ask you to confirm the order will be ready at 16:00 and their slot is 16:00 - 17:00.
 3. Offer, in one short line: "Would you like me to pass this to the team? They'll contact you on this number." On WhatsApp you already hold the number, so do not ask for it. On the website, ask in the same message for the best email or phone number for them to reach the customer on.
 4. Call forward_query only after a yes. A contact detail given in reply to your offer counts as a yes. Pass customer_name as "Not provided" if the customer hasn't given it.
 
@@ -974,10 +988,12 @@ Customer: It's under the name Thandi Mokoena.
 (new detail that helps the team find the order — call forward_query with
 "FOLLOW-UP: the order is under the name Thandi Mokoena.")
 
-If forward_query or report_defect returns an error, do not tell the
-customer it was sent. Say there was a technical problem passing it on and
-that the team will still be notified, and give them order@cakecanteen.co.za
-with their order number in case they want to follow up directly.
+If forward_query or report_defect returns an error, call it once more with
+the same details, because most errors are short-lived. If the second call
+also fails, do not tell the customer it was sent, and never say the team
+has been or will be notified. Say there was a technical problem passing it
+on, and give them order@cakecanteen.co.za with their order number so they
+can reach the team directly.
 
 ## Defective or damaged orders
 
@@ -1700,6 +1716,24 @@ def _email_dry_run(kind: str, fields: dict) -> bool:
     return True
 
 
+def _resend_post(payload: dict) -> None:
+    """POST one email to Resend. Retries once after 1 s on 429 or 5xx (short-lived
+    rate limits/outages), then raises on any non-2xx (Planned-Updates/11.11.2026.md)."""
+    with httpx.Client(timeout=15) as http:
+        for attempt in (1, 2):
+            resp = http.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                json=payload,
+            )
+            if attempt == 1 and (resp.status_code == 429 or resp.status_code >= 500):
+                print(f"[email] Resend HTTP {resp.status_code}, retrying once")
+                time.sleep(1)
+                continue
+            break
+        resp.raise_for_status()
+
+
 def _send_defect_email(report: dict) -> bool:
     """Send a defective order notification to the store owner via Resend REST API.
     Returns True on success, False on any failure."""
@@ -1718,18 +1752,12 @@ def _send_defect_email(report: dict) -> bool:
     ])
 
     try:
-        with httpx.Client(timeout=15) as http:
-            resp = http.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-                json={
-                    "from": RESEND_FROM,
-                    "to": [STORE_OWNER_EMAIL],
-                    "subject": f"⚠️ Defective order — #{esc(report.get('order_number', 'unknown'))}",
-                    "html": html,
-                },
-            )
-            resp.raise_for_status()
+        _resend_post({
+            "from": RESEND_FROM,
+            "to": [STORE_OWNER_EMAIL],
+            "subject": f"⚠️ Defective order — #{esc(report.get('order_number', 'unknown'))}",
+            "html": html,
+        })
         print(f"[email] Defect report sent for order {report.get('order_number')}")
         return True
     except Exception as exc:
@@ -1772,18 +1800,12 @@ def _send_query_email(query: dict) -> bool:
     html = _escalation_email_html("🚫" if title.startswith("Cancel") else "💬", title, rows, banner=banner)
 
     try:
-        with httpx.Client(timeout=15) as http:
-            resp = http.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-                json={
-                    "from": RESEND_FROM,
-                    "to": [STORE_OWNER_EMAIL],
-                    "subject": subject,
-                    "html": html,
-                },
-            )
-            resp.raise_for_status()
+        _resend_post({
+            "from": RESEND_FROM,
+            "to": [STORE_OWNER_EMAIL],
+            "subject": subject,
+            "html": html,
+        })
         print(f"[email] Customer query forwarded from {query.get('customer_name')}")
         return True
     except Exception as exc:
@@ -1816,18 +1838,12 @@ def _send_tool_failure_alert(context: str, error_type: str,
     ], note=note)
 
     try:
-        with httpx.Client(timeout=15) as http:
-            resp = http.post(
-                "https://api.resend.com/emails",
-                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-                json={
-                    "from": RESEND_FROM,
-                    "to": [ALERT_EMAIL],
-                    "subject": f"🔧 Cake Canteen agent: tool failure ({esc(error_type[:80])})",
-                    "html": html,
-                },
-            )
-            resp.raise_for_status()
+        _resend_post({
+            "from": RESEND_FROM,
+            "to": [ALERT_EMAIL],
+            "subject": f"🔧 Cake Canteen agent: tool failure ({esc(error_type[:80])})",
+            "html": html,
+        })
         print(f"[email] Tool failure alert sent: {error_type}")
         return True
     except Exception as exc:
