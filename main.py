@@ -499,6 +499,16 @@ If a customer asks whether they are talking to a human or a bot, be honest — y
 
 If a customer is abusive or uses offensive language, respond calmly and professionally, and let them know you're only able to assist with their Cake Canteen shopping.
 
+### When a customer comes from the newsletter
+Sometimes the conversation context says the customer came to WhatsApp from the Cake Canteen newsletter. They tapped a button in the email, so their first message is usually a pre-typed hello.
+- If their message is only that hello, reply with one short welcome: thank them for coming over from the newsletter, say you're Cake Canteen's AI assistant, list in one sentence what you can help with (finding a cake, flavours and prices, delivery and collection, an order they've placed), and ask what they're looking for. Do not search for products yet.
+- If they also asked something, answer it straight away and start with one short line of welcome. Do not list everything you can help with.
+- Never mention the campaign code and don't ask which newsletter they read.
+- Welcome them once. If the context appears again later in the conversation, carry on normally.
+Right (hello only): "Hi there, thanks for popping over from our newsletter! 🧁 I'm Cake Canteen's AI assistant. I can help you find a cake, check flavours and prices, explain delivery and collection, or look up an order you've placed. What can I help you with today?"
+Right (with a question about Joburg delivery): "Hi, thanks for coming over from our newsletter! Yes, we deliver nationwide..." (then the normal delivery answer).
+Wrong: "Welcome, campaign NL-NOV26 customer!" or a search for featured products nobody asked for.
+
 Your job is to help customers:
 - Search and discover products using natural language
 - Understand product details, pricing, and availability
@@ -2122,6 +2132,26 @@ def _run_agent_and_reply_inner(session_id: str, user_message: str, phone_number:
     )
 
 
+# Newsletter → WhatsApp campaign code (Planned-Updates/16.11.2026.md). The wa.me link
+# in the newsletter pre-types a message ending in e.g. "(NL-NOV26)". Any NL- code is
+# accepted, so a new newsletter needs no code change.
+_CAMPAIGN_RE = re.compile(r"\(?\b(NL-[A-Z0-9]{2,12})\b\)?", re.IGNORECASE)
+
+
+def _extract_campaign(text: str) -> tuple[str | None, str]:
+    """Return (CODE, text without the code), or (None, text) when there's no code."""
+    m = _CAMPAIGN_RE.search(text)
+    if not m:
+        return None, text
+    cleaned = " ".join((text[:m.start()] + text[m.end():]).split())
+    return m.group(1).upper(), cleaned
+
+
+def _newsletter_context(code: str) -> str:
+    return (f"[This customer came to WhatsApp from the Cake Canteen newsletter "
+            f"(campaign {code}). Welcome them as the prompt describes.]")
+
+
 @app.post("/whatsapp")
 async def whatsapp_webhook(
     request: Request,
@@ -2174,6 +2204,10 @@ async def whatsapp_webhook(
     phone_number = From
     user_message = Body.strip()
 
+    campaign, user_message = _extract_campaign(user_message)
+    if campaign:
+        print(f"[whatsapp] 📣 campaign {campaign}")  # code only, never the number
+
     session_id = whatsapp_sessions.get(phone_number)
     if not session_id:
         session = client.beta.sessions.create(
@@ -2182,7 +2216,7 @@ async def whatsapp_webhook(
             title=f"WhatsApp session {phone_number}",
             # For transcript pulls and reporting; the model is NOT assumed to
             # see metadata — the context prefix below is what informs it.
-            metadata={"channel": "whatsapp"},
+            metadata={"channel": "whatsapp", **({"campaign": campaign} if campaign else {})},
             vault_ids=[MCP_VAULT_ID],
         )
         session_id = session.id
@@ -2197,6 +2231,12 @@ async def whatsapp_webhook(
             f"[Channel: WhatsApp. This customer's contact number is {contact_number}.]"
             f"\n\n{user_message}"
         )
+
+    # Newsletter campaign context goes first, on new and existing sessions alike
+    # (a customer already chatting can still tap the button). With only the code
+    # sent, the message is just the context line(s).
+    if campaign:
+        user_message = f"{_newsletter_context(campaign)}\n\n{user_message}".rstrip()
 
     background_tasks.add_task(
         lambda: executor.submit(_run_agent_and_reply, session_id, user_message, phone_number)
